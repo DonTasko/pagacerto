@@ -1,5 +1,5 @@
 /* Service worker mínimo: rede primeiro, cache como reserva (a app abre offline). */
-const CACHE = 'pagacerto-v5';
+const CACHE = 'pagacerto-v6';
 const SHELL = ['./', 'index.html', 'css/style.css', 'js/parser.js', 'js/models.js', 'js/db.js', 'js/repo.js', 'js/app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

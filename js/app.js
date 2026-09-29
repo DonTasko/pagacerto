@@ -212,6 +212,7 @@
       ${p.status === 'paid'
         ? `<button class="btn secondary" data-action="reopen" data-arg="${esc(p.id)}">Reabrir (voltar a pendente)</button>`
         : `<button class="btn green" data-action="pay" data-arg="${esc(p.id)}">Marcar como pago</button>`}
+      <a class="btn secondary" href="${esc(M.googleCalendarUrl(p))}" target="_blank" rel="noopener">📅 Adicionar ao Google Calendar</a>
       <a class="btn secondary" href="#/edit/${esc(p.id)}">Editar</a>
       <button class="btn danger" data-action="delete" data-arg="${esc(p.id)}">Eliminar</button>
       ${groupHtml}`);

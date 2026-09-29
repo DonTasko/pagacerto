@@ -226,6 +226,26 @@
     return String(ref || '').replace(/\s/g, '').replace(/(\d{3})(?=\d)/g, '$1 ');
   }
 
+  // Ligação que abre o Google Calendar com o evento (dia inteiro) já preenchido. Sem login nem API.
+  function googleCalendarUrl(p) {
+    const ymd = iso => iso.replace(/-/g, '');
+    const inst = installmentLabel(p);
+    const title = `Pagar ${p.issuer || 'pagamento'}${inst ? ' (' + inst.toLowerCase() + ')' : ''} · ${formatEUR(p.amountCents)}`;
+    const lines = [`Valor: ${formatEUR(p.amountCents)}`];
+    if (p.entity) lines.push(`Entidade: ${p.entity}`);
+    if (p.reference) lines.push(`Referência: ${formatReference(p.reference)}`);
+    if (p.iban) lines.push(`IBAN: ${p.iban}`);
+    if (p.invoiceNumber) lines.push(`Fatura: ${p.invoiceNumber}`);
+    if (p.description) lines.push(p.description);
+    if (p.notes) lines.push(p.notes);
+    const q = new URLSearchParams({
+      action: 'TEMPLATE', text: title,
+      dates: `${ymd(p.dueDate)}/${ymd(addDays(p.dueDate, 1))}`,
+      details: lines.join('\n') + '\n\n(PagaCerto)'
+    });
+    return 'https://calendar.google.com/calendar/render?' + q.toString();
+  }
+
   function emptyPayment() {
     return {
       id: newId(), paymentType: 'mb', issuer: '', amountCents: null, dueDate: '', entity: '', reference: '', iban: '',
@@ -251,6 +271,6 @@
     newId, todayISO, localDateOf, addDays, addMonths, diffDays, effectiveStatus,
     formatEUR, centsToInput, formatDate, formatDayLabel, installmentLabel,
     generateInstallments, recurringDates, generateRecurring, recurrenceTopUp, matches, summarize, calendarCells,
-    emptyPayment, activeCount, paymentTypeOf, formatReference
+    emptyPayment, googleCalendarUrl, activeCount, paymentTypeOf, formatReference
   };
 }));

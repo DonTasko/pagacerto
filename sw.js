@@ -1,6 +1,6 @@
 /* Service worker mínimo: rede primeiro, cache como reserva (a app abre offline). */
-const CACHE = 'pagacerto-v6';
-const SHELL = ['./', 'index.html', 'css/style.css', 'js/parser.js', 'js/models.js', 'js/db.js', 'js/repo.js', 'js/app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'pagacerto-v7';
+const SHELL = ['./', 'index.html', 'css/style.css', 'js/parser.js', 'js/models.js', 'js/db.js', 'js/repo.js', 'js/sync.js', 'js/app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

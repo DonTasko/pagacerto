@@ -1,5 +1,5 @@
 /* PagaCerto — interface. Sem frameworks: rotas por hash, HTML em template strings.
- * TODO texto do utilizador passa por esc() antes de entrar em innerHTML.
+ * Todo o texto do utilizador passa por esc() antes de entrar em innerHTML.
  */
 (function () {
   'use strict';
@@ -9,12 +9,21 @@
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  // Rascunho vindo de "colar texto" / partilha: { payment, confidence, warnings }
-  let draft = null;
-  let listFilter = 'open';
+  // ---------- estado da interface ----------
+  let draft = null;              // rascunho vindo de "colar texto" / partilha: { payment, confidence, warnings }
+  let listFilter = 'open';       // Pagamentos: open | paid | all
+  let payQ = '';                 // Pagamentos: pesquisa
+  let payList = [];              // Pagamentos: última lista carregada (a pesquisa filtra sem recarregar)
+  let calMonth = null;           // Calendário: AAAA-MM (null = mês atual)
+  let calDay = null;             // Calendário: dia selecionado
+  const hist = { status: 'all', month: '', issuer: '', category: '', q: '' };
+  let histList = [];
 
+  const RECUR_TARGET = 12;       // ocorrências por pagar que se mantêm criadas num pagamento recorrente
   const REMIND_LABEL = { 0: 'No próprio dia', 1: '1 dia antes', 3: '3 dias antes', 5: '5 dias antes', 7: '7 dias antes' };
   const TYPE_LABEL = { mb: 'Multibanco (entidade e referência)', state: 'Pagamento ao Estado (só referência)', other: 'Transferência ou outro' };
+  const FREQ_LABEL = { monthly: 'Mensal', bimonthly: 'Bimestral', quarterly: 'Trimestral', semiannual: 'Semestral', annual: 'Anual', custom: 'Personalizado' };
+  const EVERY_LABEL = { 1: 'Mensal', 2: 'Bimestral', 3: 'Trimestral', 6: 'Semestral', 12: 'Anual' };
   const STATE_HOWTO = 'No Multibanco: Pagamentos e outros serviços → Estado e sector público → Pagamentos ao Estado. Introduza a referência e confirme o montante.';
 
   // O browser só oferece "instalar" quando considera a página instalável; guardamos o pedido.
@@ -56,17 +65,25 @@
     return `<main>${inner}</main>${opts.noFab ? '' : '<a class="fab" href="#/new" aria-label="Novo pagamento">+</a>'}<nav class="bottom">${nav}</nav>`;
   }
 
-  function paymentItem(p, today) {
+  function dotFor(p, today) {
     const st = M.effectiveStatus(p, today);
+    return st === 'pending' && p.recurrenceId ? 'recurring' : st;
+  }
+
+  function paymentItem(p, today) {
     const inst = M.installmentLabel(p);
     return `<a class="item card" href="#/p/${esc(p.id)}"><div class="row">
-      <span class="dot ${st}"></span>
+      <span class="dot ${dotFor(p, today)}"></span>
       <div class="grow"><div class="title">${esc(p.issuer || 'Sem nome')}</div>
         <div class="sub">${inst ? esc(inst) + ' · ' : ''}${M.formatDate(p.dueDate)}</div></div>
       <div class="amount">${M.formatEUR(p.amountCents)}</div></div></a>`;
   }
 
   const plural = (n, one, many) => n === 1 ? one : many;
+  const monthLabel = ym => {
+    const s = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1, 1).toLocaleDateString('pt-PT', { month: 'long', year: 'numeric' });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  };
 
   // ---------- vistas ----------
   function viewOnboarding() {
@@ -121,25 +138,57 @@
       <h2>Próximos pagamentos</h2>${listHtml}`);
   }
 
-  async function viewPayments() {
-    const list = await R.payments.list();
+  // ----- Pagamentos (com pesquisa global) -----
+  function paymentsBody() {
     const today = M.todayISO();
-    const filtered = list.filter(p => listFilter === 'all' ? true : listFilter === 'paid' ? p.status === 'paid' : p.status !== 'paid');
-    if (listFilter === 'paid') filtered.reverse();
+    const q = payQ.trim();
+    let rows, note = '';
+    if (q) {
+      // A pesquisa procura em TODOS os pagamentos, ignorando o filtro por estado.
+      rows = payList.filter(p => M.matches(p, q));
+      note = `<p class="muted">${rows.length} ${plural(rows.length, 'resultado', 'resultados')} em todos os pagamentos</p>`;
+    } else {
+      rows = payList.filter(p => listFilter === 'all' ? true : listFilter === 'paid' ? p.status === 'paid' : p.status !== 'paid');
+      if (listFilter === 'paid') rows = rows.slice().reverse();
+    }
+    return note + (rows.length ? rows.map(p => paymentItem(p, today)).join('') : '<div class="empty">Nada por aqui.</div>');
+  }
+
+  async function viewPayments() {
+    payList = await R.payments.list();
     const chip = (key, label) => `<button class="chip ${listFilter === key ? 'active' : ''}" data-action="filter" data-arg="${key}">${label}</button>`;
     $app.innerHTML = layout('payments', `
       <h1>Pagamentos</h1>
+      <input type="search" data-bind="pay-q" placeholder="Pesquisar: Vodafone, 120, Prestação 3…" value="${esc(payQ)}" style="margin-top:12px">
       <div class="chips" style="margin:12px 0">${chip('open', 'Por pagar')}${chip('paid', 'Pagos')}${chip('all', 'Todos')}</div>
-      ${filtered.length ? filtered.map(p => paymentItem(p, today)).join('') : '<div class="empty">Nada por aqui.</div>'}`);
+      <div id="pay-body">${paymentsBody()}</div>`);
   }
 
+  // ----- Detalhe -----
   async function viewDetail(id) {
     const p = await R.payments.get(id);
     if (!p) { location.hash = '#/payments'; return; }
-    const st = M.effectiveStatus(p);
+    const today = M.todayISO();
+    const st = M.effectiveStatus(p, today);
     const row = (label, val) => val ? `<dt>${label}</dt><dd>${esc(val)}</dd>` : '';
     const paidInfo = p.paidAt ? new Date(p.paidAt).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : '';
     const type = M.paymentTypeOf(p);
+
+    // Outras prestações / ocorrências do mesmo grupo
+    let groupHtml = '';
+    const gid = p.planId || p.recurrenceId;
+    if (gid) {
+      const all = await R.payments.list();
+      const group = all.filter(x => (p.planId ? x.planId === gid : x.recurrenceId === gid));
+      const title = p.planId ? 'Plano de prestações' : `Repetição ${p.recurrence ? '(' + (FREQ_LABEL[p.recurrence.frequency] || '').toLowerCase() + ')' : ''}`;
+      groupHtml = `<h2>${esc(title)}</h2>` + group.map(x => `
+        <a class="item card ${x.id === p.id ? 'current' : ''}" href="#/p/${esc(x.id)}"><div class="row">
+          <span class="dot ${dotFor(x, today)}"></span>
+          <div class="grow"><div class="title">${esc(M.installmentLabel(x) || M.formatDate(x.dueDate))}</div>
+            <div class="sub">${M.formatDate(x.dueDate)}${x.reference ? ' · ref. ' + esc(M.formatReference(x.reference)) : ''}</div></div>
+          <div class="amount">${M.formatEUR(x.amountCents)}</div></div></a>`).join('');
+    }
+
     $app.innerHTML = layout('payments', `
       <a href="#/payments" class="muted">← Pagamentos</a>
       <div class="card" style="margin-top:12px">
@@ -164,9 +213,11 @@
         ? `<button class="btn secondary" data-action="reopen" data-arg="${esc(p.id)}">Reabrir (voltar a pendente)</button>`
         : `<button class="btn green" data-action="pay" data-arg="${esc(p.id)}">Marcar como pago</button>`}
       <a class="btn secondary" href="#/edit/${esc(p.id)}">Editar</a>
-      <button class="btn danger" data-action="delete" data-arg="${esc(p.id)}">Eliminar</button>`);
+      <button class="btn danger" data-action="delete" data-arg="${esc(p.id)}">Eliminar</button>
+      ${groupHtml}`);
   }
 
+  // ----- Formulário -----
   function fieldHtml(id, label, value, o) {
     o = o || {};
     let cls = '', hint = '';
@@ -205,6 +256,31 @@
     const found = parsed ? `<div class="alert blue"><b>PAGAMENTO ENCONTRADO</b><br>Confira cada campo antes de guardar. Os campos a laranja precisam da sua confirmação.</div>` : '';
     const warn = warnings && warnings.length ? `<div class="alert">${warnings.map(w => esc(w)).join('<br>')}</div>` : '';
 
+    // Repetição: só em pagamentos novos. Editar mexe apenas neste pagamento.
+    const repetition = existingId ? '' : `
+        <label for="f-rep">Repetição</label>
+        <select id="f-rep">
+          <option value="once">Só este pagamento</option>
+          <option value="plan">Plano de prestações (criar todas)</option>
+          <option value="recurring">Pagamento recorrente</option>
+        </select>
+        <div id="box-plan" style="display:none">
+          <label for="f-plan-n">Número de prestações</label>
+          <input id="f-plan-n" type="number" min="2" max="120" inputmode="numeric" value="12">
+          <label for="f-plan-every">Periodicidade</label>
+          <select id="f-plan-every">${Object.keys(EVERY_LABEL).map(k => `<option value="${k}">${EVERY_LABEL[k]}</option>`).join('')}</select>
+          <div class="hint" style="color:var(--muted)">O valor e a data acima são os da 1.ª prestação. Cada prestação fica individual, e pode editar a referência de cada uma.</div>
+        </div>
+        <div id="box-rec" style="display:none">
+          <label for="f-rec-freq">Repete-se</label>
+          <select id="f-rec-freq">${Object.keys(FREQ_LABEL).map(k => `<option value="${k}">${FREQ_LABEL[k]}</option>`).join('')}</select>
+          <div id="box-rec-custom" style="display:none">
+            <label for="f-rec-custom">De quantos em quantos meses</label>
+            <input id="f-rec-custom" type="number" min="1" max="60" inputmode="numeric" value="1">
+          </div>
+          <div class="hint" style="color:var(--muted)">Cria já as próximas ${RECUR_TARGET} ocorrências e junta uma nova sempre que pagar uma.</div>
+        </div>`;
+
     $app.innerHTML = layout('payments', `
       <a href="#/${existingId ? 'p/' + esc(existingId) : ''}" class="muted" data-action="cancel">← Cancelar</a>
       <h1 style="margin-top:8px">${existingId ? 'Editar pagamento' : 'Novo pagamento'}</h1>
@@ -227,11 +303,14 @@
         <label for="f-notes">Notas (opcional)</label>
         <textarea id="f-notes" style="min-height:64px">${esc(p.notes)}</textarea>
 
-        <label class="check"><input type="checkbox" id="f-inst" ${isInst ? 'checked' : ''}> É uma prestação</label>
-        <div id="inst-box" class="inline" style="${isInst ? '' : 'display:none'}">
-          <input id="f-inst-no" type="number" min="1" inputmode="numeric" placeholder="3" value="${p.installmentNo || ''}">
-          <span>de</span>
-          <input id="f-inst-total" type="number" min="1" inputmode="numeric" placeholder="12" value="${p.installmentTotal || ''}">
+        ${repetition}
+        <div id="box-once">
+          <label class="check"><input type="checkbox" id="f-inst" ${isInst ? 'checked' : ''}> Este pagamento é uma prestação</label>
+          <div id="inst-box" class="inline" style="${isInst ? '' : 'display:none'}">
+            <input id="f-inst-no" type="number" min="1" inputmode="numeric" placeholder="3" value="${p.installmentNo || ''}">
+            <span>de</span>
+            <input id="f-inst-total" type="number" min="1" inputmode="numeric" placeholder="12" value="${p.installmentTotal || ''}">
+          </div>
         </div>
 
         <label class="check"><input type="checkbox" id="f-remind" ${(p.remindDays || []).length ? 'checked' : ''}> Criar lembrete</label>
@@ -254,6 +333,20 @@
     };
     typeSel.addEventListener('change', applyType);
     applyType();
+
+    // Repetição: mostra só o bloco que interessa.
+    const rep = document.getElementById('f-rep');
+    if (rep) {
+      const applyRep = () => {
+        document.getElementById('box-plan').style.display = rep.value === 'plan' ? '' : 'none';
+        document.getElementById('box-rec').style.display = rep.value === 'recurring' ? '' : 'none';
+        document.getElementById('box-once').style.display = rep.value === 'once' ? '' : 'none';
+      };
+      rep.addEventListener('change', applyRep);
+      const freq = document.getElementById('f-rec-freq');
+      freq.addEventListener('change', () => { document.getElementById('box-rec-custom').style.display = freq.value === 'custom' ? '' : 'none'; });
+      applyRep();
+    }
     document.getElementById('pay-form').addEventListener('submit', e => { e.preventDefault(); savePayment(existingId ? p : null, p); });
   }
 
@@ -271,8 +364,12 @@
     const entity = type === 'mb' ? v('f-entity').replace(/\s/g, '') : '';
     const reference = v('f-ref').replace(/[\s.]/g, '');
     const iban = v('f-iban').replace(/\s/g, '').toUpperCase();
-    const isInst = document.getElementById('f-inst').checked;
+    const rep = existing ? 'once' : v('f-rep');
+    const isInst = rep === 'once' && document.getElementById('f-inst').checked;
     const instNo = parseInt(v('f-inst-no'), 10), instTotal = parseInt(v('f-inst-total'), 10);
+    const planN = parseInt(rep === 'plan' ? v('f-plan-n') : '0', 10);
+    const recCustom = parseInt(rep === 'recurring' ? v('f-rec-custom') : '0', 10);
+    const recFreq = rep === 'recurring' ? v('f-rec-freq') : '';
 
     if (!v('f-issuer')) return showFormError('Indique o nome de quem emite o pagamento.');
     if (cents == null || cents <= 0) return showFormError('Indique um valor válido, por exemplo 87,43.');
@@ -283,6 +380,8 @@
     if (type === 'other' && reference && !/^\d+$/.test(reference)) return showFormError('A referência só pode ter dígitos.');
     if (iban && !P.ibanValid(iban)) return showFormError('O IBAN não é válido. Confirme cada dígito ou apague o campo.');
     if (isInst && !(instNo >= 1 && instTotal >= instNo)) return showFormError('Indique a prestação, por exemplo 3 de 12.');
+    if (rep === 'plan' && !(planN >= 2 && planN <= 120)) return showFormError('O plano tem de ter entre 2 e 120 prestações.');
+    if (recFreq === 'custom' && !(recCustom >= 1 && recCustom <= 60)) return showFormError('Indique de quantos em quantos meses (1 a 60).');
 
     const remind = document.getElementById('f-remind').checked
       ? Array.from(document.querySelectorAll('.f-rd:checked')).map(x => +x.value).sort((a, b) => b - a) : [];
@@ -294,12 +393,107 @@
       remindDays: remind, status: existing ? existing.status : 'pending'
     });
     delete out.sample;
-    await R.payments.save(out);
+
+    if (rep === 'plan') {
+      const list = M.generateInstallments({
+        issuer: out.issuer, amountCents: cents, firstDate: due, count: planN, everyMonths: +v('f-plan-every'),
+        paymentType: type, entity, reference, iban, category: out.category, description: out.description,
+        notes: out.notes, remindDays: remind
+      });
+      list[0].invoiceNumber = out.invoiceNumber;
+      await R.payments.saveMany(list);
+    } else if (rep === 'recurring') {
+      out.installmentNo = null; out.installmentTotal = null;
+      await R.payments.saveMany(M.generateRecurring(out, recFreq, RECUR_TARGET, recCustom));
+    } else {
+      await R.payments.save(out);
+    }
     if (entity) await R.entities.remember(entity, out.issuer); // aprende "12345 = EDP"
     draft = null;
     location.hash = existing ? '#/p/' + out.id : '#/';
   }
 
+  // ----- Calendário -----
+  async function viewCalendar() {
+    const list = await R.payments.list();
+    const today = M.todayISO();
+    const month = calMonth || today.slice(0, 7);
+    const selected = calDay && calDay.slice(0, 7) === month ? calDay : (today.slice(0, 7) === month ? today : null);
+    const byDay = {};
+    list.forEach(p => { (byDay[p.dueDate] = byDay[p.dueDate] || []).push(p); });
+
+    const cells = M.calendarCells(month).map(iso => {
+      if (!iso) return '<div class="cal-cell empty"></div>';
+      const items = byDay[iso] || [];
+      return `<button class="cal-cell ${iso === today ? 'today' : ''} ${iso === selected ? 'sel' : ''}" data-action="calday" data-arg="${iso}" aria-label="${M.formatDate(iso)}">
+        <span class="n">${+iso.slice(8)}</span>
+        <span class="dots">${items.slice(0, 4).map(p => `<i class="dot2 ${dotFor(p, today)}"></i>`).join('')}</span></button>`;
+    }).join('');
+
+    const monthItems = list.filter(p => p.dueDate.slice(0, 7) === month);
+    const monthPending = monthItems.filter(p => p.status !== 'paid').reduce((s, p) => s + (p.amountCents || 0), 0);
+    const dayItems = selected ? (byDay[selected] || []) : [];
+
+    $app.innerHTML = layout('calendar', `
+      <div class="row" style="margin-bottom:4px">
+        <button class="chip" data-action="calprev" aria-label="Mês anterior">‹</button>
+        <h1 class="grow" style="text-align:center;margin:0;font-size:20px">${esc(monthLabel(month))}</h1>
+        <button class="chip" data-action="calnext" aria-label="Mês seguinte">›</button>
+      </div>
+      <p class="muted" style="text-align:center">${monthItems.length} ${plural(monthItems.length, 'pagamento', 'pagamentos')} · por pagar ${M.formatEUR(monthPending)}</p>
+      <div class="cal">
+        ${['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'].map(d => `<div class="cal-head">${d}</div>`).join('')}
+        ${cells}
+      </div>
+      <div class="legend"><span><i class="dot2 paid"></i> Pago</span><span><i class="dot2 pending"></i> Próximo</span><span><i class="dot2 overdue"></i> Em atraso</span><span><i class="dot2 recurring"></i> Recorrente</span></div>
+      ${(calMonth && calMonth !== today.slice(0, 7)) ? '<button class="btn secondary small" data-action="caltoday">Voltar a este mês</button>' : ''}
+      ${selected ? `<h2>${M.formatDate(selected)}</h2>${dayItems.length ? dayItems.map(p => paymentItem(p, today)).join('') : '<div class="empty" style="padding:12px">Sem pagamentos neste dia.</div>'}` : '<h2>Toque num dia</h2>'}`);
+  }
+
+  // ----- Histórico -----
+  function historyRows() {
+    const today = M.todayISO();
+    return histList.filter(p =>
+      (hist.status === 'all' || M.effectiveStatus(p, today) === hist.status) &&
+      (!hist.month || p.dueDate.slice(0, 7) === hist.month) &&
+      (!hist.issuer || p.issuer === hist.issuer) &&
+      (!hist.category || p.category === hist.category) &&
+      M.matches(p, hist.q)
+    ).sort((a, b) => b.dueDate.localeCompare(a.dueDate));
+  }
+
+  function historyBody() {
+    const today = M.todayISO();
+    const rows = historyRows();
+    const s = M.summarize(rows, today);
+    return `<div class="stats">
+        <div class="stat"><div class="label">${s.count} ${plural(s.count, 'pagamento', 'pagamentos')}</div><div class="value">${M.formatEUR(s.total)}</div></div>
+        <div class="stat green"><div class="label">Pago</div><div class="value">${M.formatEUR(s.paid)}</div></div>
+        <div class="stat ${s.overdue ? 'red' : ''}"><div class="label">Por pagar</div><div class="value">${M.formatEUR(s.pending + s.overdue)}</div></div>
+      </div>` + (rows.length ? rows.map(p => paymentItem(p, today)).join('') : '<div class="empty">Nenhum pagamento com estes filtros.</div>');
+  }
+
+  async function viewHistory() {
+    histList = await R.payments.list();
+    const uniq = arr => Array.from(new Set(arr.filter(Boolean)));
+    const months = uniq(histList.map(p => p.dueDate.slice(0, 7))).sort().reverse();
+    const issuers = uniq(histList.map(p => p.issuer)).sort((a, b) => a.localeCompare(b, 'pt'));
+    const cats = uniq(histList.map(p => p.category)).sort((a, b) => a.localeCompare(b, 'pt'));
+    const chip = (key, label) => `<button class="chip ${hist.status === key ? 'active' : ''}" data-action="hstatus" data-arg="${key}">${label}</button>`;
+    const sel = (bind, all, cur, opts) => `<select data-bind="${bind}"><option value="">${all}</option>${opts.map(([val, label]) => `<option value="${esc(val)}" ${val === cur ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>`;
+    $app.innerHTML = layout('history', `
+      <h1>Histórico</h1>
+      <input type="search" data-bind="hist-q" placeholder="Pesquisar em todos os pagamentos…" value="${esc(hist.q)}" style="margin-top:12px">
+      <div class="chips" style="margin:12px 0">${chip('all', 'Todos')}${chip('paid', 'Pagos')}${chip('pending', 'Pendentes')}${chip('overdue', 'Em atraso')}</div>
+      <div class="filters">
+        ${sel('hist-month', 'Todos os meses', hist.month, months.map(m => [m, monthLabel(m)]))}
+        ${sel('hist-issuer', 'Todas as entidades', hist.issuer, issuers.map(i => [i, i]))}
+        ${sel('hist-cat', 'Todas as categorias', hist.category, cats.map(c => [c, c]))}
+      </div>
+      <div id="hist-body" style="margin-top:12px">${historyBody()}</div>`);
+  }
+
+  // ----- Definições -----
   async function viewSettings() {
     const list = await R.payments.list();
     const samples = list.filter(p => p.sample).length;
@@ -334,11 +528,7 @@
         : `<button class="btn secondary" data-action="sample">Carregar dados de exemplo</button>`}
       <h2>Dados</h2>
       <button class="btn danger" data-action="wipe">Apagar todos os dados</button>
-      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.1 (fase 1)</p>`);
-  }
-
-  function viewSoon(active, title, text) {
-    $app.innerHTML = layout(active, `<h1>${title}</h1><div class="empty">${text}</div>`);
+      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.2 (fase 2)</p>`);
   }
 
   // ---------- ações ----------
@@ -350,6 +540,11 @@
       await handleSharedText(text, '');
     },
     filter(arg) { listFilter = arg; render(); },
+    hstatus(arg) { hist.status = arg; render(); },
+    calprev() { calMonth = M.addMonths((calMonth || M.todayISO().slice(0, 7)) + '-01', -1).slice(0, 7); calDay = null; render(); },
+    calnext() { calMonth = M.addMonths((calMonth || M.todayISO().slice(0, 7)) + '-01', 1).slice(0, 7); calDay = null; render(); },
+    calday(arg) { calDay = arg; render(); },
+    caltoday() { calMonth = null; calDay = null; render(); },
     async install() {
       if (!deferredInstall) return;
       deferredInstall.prompt();
@@ -357,11 +552,29 @@
       deferredInstall = null;
       render();
     },
-    async pay(id) { await R.payments.markPaid(id); render(); },
+    async pay(id) {
+      const p = await R.payments.markPaid(id);
+      // Pagamento recorrente: repõe as ocorrências por pagar (mantém sempre RECUR_TARGET à frente).
+      if (p && p.recurrenceId) {
+        const group = (await R.payments.list()).filter(x => x.recurrenceId === p.recurrenceId);
+        const extra = M.recurrenceTopUp(group, RECUR_TARGET);
+        if (extra.length) await R.payments.saveMany(extra);
+      }
+      render();
+    },
     async reopen(id) { await R.payments.reopen(id); render(); },
     async delete(id) {
+      const p = await R.payments.get(id);
+      if (!p) return;
       if (!confirm('Eliminar este pagamento? Esta ação não pode ser desfeita.')) return;
-      await R.payments.remove(id); location.hash = '#/payments';
+      let ids = [id];
+      const gid = p.planId || p.recurrenceId;
+      if (gid && confirm('Este pagamento faz parte de um plano ou de uma repetição.\n\nOK: eliminar também os seguintes que ainda estão por pagar.\nCancelar: eliminar só este.')) {
+        const all = await R.payments.list();
+        ids = all.filter(x => (x.planId === gid || x.recurrenceId === gid) && x.status !== 'paid' && x.dueDate >= p.dueDate).map(x => x.id);
+      }
+      await R.payments.removeMany(ids);
+      location.hash = '#/payments';
     },
     async sample() { await R.seedSamples(); render(); },
     async 'clear-samples'() { await R.payments.removeSamples(); render(); },
@@ -379,6 +592,19 @@
     if (!fn) return;
     if (el.tagName === 'BUTTON') e.preventDefault();
     Promise.resolve(fn(el.dataset.arg)).catch(showFatal);
+  });
+
+  // Campos de pesquisa e filtros (data-bind): a pesquisa atualiza só a lista, para não perder o foco do teclado.
+  const binds = {
+    'pay-q'(val) { payQ = val; document.getElementById('pay-body').innerHTML = paymentsBody(); },
+    'hist-q'(val) { hist.q = val; document.getElementById('hist-body').innerHTML = historyBody(); },
+    'hist-month'(val) { hist.month = val; render(); },
+    'hist-issuer'(val) { hist.issuer = val; render(); },
+    'hist-cat'(val) { hist.category = val; render(); }
+  };
+  document.addEventListener('input', e => {
+    const b = e.target.dataset && e.target.dataset.bind;
+    if (b && binds[b]) binds[b](e.target.value);
   });
 
   // ---------- router ----------
@@ -399,16 +625,15 @@
         case 'p': return await viewDetail(arg);
         case 'new': return await viewForm(null);
         case 'edit': return await viewForm(arg);
-        case 'calendar': return viewSoon('calendar', 'Calendário', 'Chega na fase 3.');
-        case 'history': return viewSoon('history', 'Histórico', 'Chega na fase 3.');
+        case 'calendar': return await viewCalendar();
+        case 'history': return await viewHistory();
         case 'settings': return await viewSettings();
         default: location.hash = '#/';
       }
     } catch (err) { showFatal(err); }
-    window.scrollTo(0, 0);
   }
 
-  window.addEventListener('hashchange', render);
+  window.addEventListener('hashchange', () => { render().then(() => window.scrollTo(0, 0)); });
 
   // Partilha via PWA (share_target, método GET): ?title=...&text=...
   async function boot() {

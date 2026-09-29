@@ -15,6 +15,7 @@
     save: p => DB.put('payments', p),
     saveMany: list => DB.putMany('payments', list),
     remove: id => DB.del('payments', id),
+    removeMany: ids => DB.delMany('payments', ids),
     clearAll: () => DB.clear('payments'),
     async removeSamples() {
       const ids = (await DB.getAll('payments')).filter(p => p.sample).map(p => p.id);

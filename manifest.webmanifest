@@ -1,0 +1,16 @@
+{
+  "name": "PagaCerto",
+  "short_name": "PagaCerto",
+  "description": "Não volte a esquecer um pagamento.",
+  "lang": "pt-PT",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#f6f7f9",
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}

@@ -6,17 +6,44 @@
   const DB = root.PagaDB;
   const M = root.PagaModels;
 
+  // Sincronização: cada gravação marca o registo com updatedAt e _dirty (por enviar).
+  // Apagar não remove: deixa uma "lápide" (deleted:true) para o apagamento chegar aos outros dispositivos.
+  const stamp = p => { p.updatedAt = new Date().toISOString(); if (!p.sample) p._dirty = true; return p; };
+  const kick = () => { try { root.PagaSync && root.PagaSync.schedule(); } catch (e) { /* sincronização é opcional */ } };
+  const tombstone = (id) => ({ id, dueDate: '', deleted: true, updatedAt: new Date().toISOString(), _dirty: true });
+
   const payments = {
     async list() {
-      const all = await DB.getAll('payments');
+      const all = (await DB.getAll('payments')).filter(p => !p.deleted);
       return all.sort((a, b) => a.dueDate.localeCompare(b.dueDate) || (a.issuer || '').localeCompare(b.issuer || ''));
     },
-    get: id => DB.get('payments', id),
-    save: p => DB.put('payments', p),
-    saveMany: list => DB.putMany('payments', list),
-    remove: id => DB.del('payments', id),
-    removeMany: ids => DB.delMany('payments', ids),
-    clearAll: () => DB.clear('payments'),
+    async get(id) {
+      const p = await DB.get('payments', id);
+      return p && !p.deleted ? p : undefined;
+    },
+    async save(p) { await DB.put('payments', stamp(p)); kick(); },
+    async saveMany(list) { list.forEach(stamp); await DB.putMany('payments', list); kick(); },
+    remove(id) { return payments.removeMany([id]); },
+    async removeMany(ids) {
+      const hard = [], soft = [];
+      for (const id of ids) {
+        const p = await DB.get('payments', id);
+        if (!p) continue;
+        (p.sample ? hard : soft).push(p.sample ? id : tombstone(id));
+      }
+      if (hard.length) await DB.delMany('payments', hard);
+      if (soft.length) await DB.putMany('payments', soft);
+      kick();
+    },
+    // Apaga tudo (com lápides, para se propagar à conta). hardClear só limpa este dispositivo.
+    async clearAll() {
+      const live = (await DB.getAll('payments')).filter(p => !p.deleted && !p.sample);
+      const samples = (await DB.getAll('payments')).filter(p => p.sample).map(p => p.id);
+      if (samples.length) await DB.delMany('payments', samples);
+      if (live.length) await DB.putMany('payments', live.map(p => tombstone(p.id)));
+      kick();
+    },
+    hardClear: () => DB.clear('payments'),
     async removeSamples() {
       const ids = (await DB.getAll('payments')).filter(p => p.sample).map(p => p.id);
       await DB.delMany('payments', ids);
@@ -24,20 +51,22 @@
     },
     async markPaid(id, method) {
       const p = await DB.get('payments', id);
-      if (!p) return null;
+      if (!p || p.deleted) return null;
       p.status = 'paid';
       p.paidAt = new Date().toISOString(); // data e hora do pagamento
       p.paidMethod = method || '';
-      await DB.put('payments', p);
+      await DB.put('payments', stamp(p));
+      kick();
       return p;
     },
     async reopen(id) {
       const p = await DB.get('payments', id);
-      if (!p) return null;
+      if (!p || p.deleted) return null;
       p.status = 'pending';
       delete p.paidAt;
       delete p.paidMethod;
-      await DB.put('payments', p);
+      await DB.put('payments', stamp(p));
+      kick();
       return p;
     }
   };
@@ -84,7 +113,8 @@
   }
 
   async function wipeEverything() {
-    await Promise.all(['payments', 'entities', 'categories'].map(s => DB.clear(s)));
+    await payments.clearAll();
+    await Promise.all(['entities', 'categories'].map(s => DB.clear(s)));
   }
 
   root.PagaRepo = { payments, settings, entities, categories, seedSamples, wipeEverything };

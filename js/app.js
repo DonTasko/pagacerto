@@ -3,7 +3,7 @@
  */
 (function () {
   'use strict';
-  const P = window.PagaParser, M = window.PagaModels, R = window.PagaRepo;
+  const P = window.PagaParser, M = window.PagaModels, R = window.PagaRepo, S = window.PagaSync;
   const $app = document.getElementById('app');
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -18,6 +18,9 @@
   let calDay = null;             // Calendário: dia selecionado
   const hist = { status: 'all', month: '', issuer: '', category: '', q: '' };
   let histList = [];
+  let accMsg = null;             // Conta: { type: 'error'|'ok', text }
+  let accEmail = '';             // Conta: email escrito (não se perde ao re-renderizar)
+  let recovering = false;        // Conta: veio de um link de recuperação de palavra-passe
 
   const RECUR_TARGET = 12;       // ocorrências por pagar que se mantêm criadas num pagamento recorrente
   const REMIND_LABEL = { 0: 'No próprio dia', 1: '1 dia antes', 3: '3 dias antes', 5: '5 dias antes', 7: '7 dias antes' };
@@ -521,7 +524,8 @@
 
     $app.innerHTML = layout('settings', `
       <h1>Definições</h1>
-      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Os seus pagamentos ficam apenas neste dispositivo. Nada é enviado para servidores e não é pedido acesso ao email nem ao banco.</div>
+      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem. Nunca é pedido acesso ao seu email nem ao banco.</div>
+      ${await accountHtml()}
       <h2>Instalar</h2>${installHtml}
       <h2>Dados de exemplo</h2>
       ${samples
@@ -529,7 +533,67 @@
         : `<button class="btn secondary" data-action="sample">Carregar dados de exemplo</button>`}
       <h2>Dados</h2>
       <button class="btn danger" data-action="wipe">Apagar todos os dados</button>
-      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.2 (fase 2)</p>`);
+      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.3 (conta e sincronização)</p>`);
+  }
+
+
+  // ----- Conta e sincronização (opcional) -----
+  async function accountHtml() {
+    const info = await S.info();
+    const msg = accMsg ? `<div class="${accMsg.type === 'error' ? 'error' : 'alert blue'}">${esc(accMsg.text)}</div>` : '';
+    accMsg = null;
+    if (recovering) {
+      return `<h2>Conta e sincronização</h2>${msg}
+        <div class="alert blue">Escolha a nova palavra-passe.</div>
+        <label for="acc-newpass">Nova palavra-passe (mínimo 8 caracteres)</label>
+        <input id="acc-newpass" type="password" autocomplete="new-password">
+        <button class="btn" data-action="acc-setpass">Guardar palavra-passe</button>`;
+    }
+    if (info.email) {
+      const last = info.lastSync ? new Date(info.lastSync).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : 'ainda não';
+      return `<h2>Conta e sincronização</h2>${msg}
+        <div class="card"><b>${esc(info.email)}</b><br><span class="muted">Última sincronização: ${esc(last)}${info.error ? '<br>' + esc(info.error) : ''}</span></div>
+        <button class="btn green" data-action="acc-sync">Sincronizar agora</button>
+        <button class="btn secondary" data-action="acc-signout">Sair da conta</button>
+        <button class="btn danger" data-action="acc-delete">Apagar conta e dados na nuvem</button>
+        <p class="muted">Os pagamentos desta conta são guardados em servidores na Europa (Londres) para aparecerem nos seus outros dispositivos.</p>`;
+    }
+    return `<h2>Conta e sincronização</h2>${msg}
+      <p class="muted">Opcional. Sem conta, tudo fica só neste dispositivo. Com conta, os seus pagamentos são guardados na nuvem e aparecem em todos os dispositivos onde entrar.</p>
+      <label for="acc-email">Email</label>
+      <input id="acc-email" type="email" autocomplete="email" value="${esc(accEmail)}">
+      <label for="acc-pass">Palavra-passe (mínimo 8 caracteres)</label>
+      <input id="acc-pass" type="password" autocomplete="current-password">
+      <button class="btn" data-action="acc-signin">Entrar</button>
+      <button class="btn secondary" data-action="acc-signup">Criar conta</button>
+      <button class="btn small secondary" data-action="acc-forgot">Esqueci a palavra-passe</button>`;
+  }
+
+  const accInputs = () => {
+    const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+    accEmail = g('acc-email').trim() || accEmail;
+    return { email: accEmail, pass: g('acc-pass') };
+  };
+  const accFail = e => { accMsg = { type: 'error', text: e && e.message ? e.message : String(e) }; };
+
+  // Depois de entrar: se o dispositivo tinha dados de outra conta, pergunta antes de os juntar.
+  async function afterLogin(session) {
+    const prev = await R.settings.get('syncUser', null);
+    if (prev !== session.user_id) {
+      if (prev) {
+        const n = (await R.payments.list()).filter(p => !p.sample).length;
+        if (n && !confirm('Este dispositivo já esteve ligado a outra conta. Os pagamentos locais serão apagados e substituídos pelos desta conta. Continuar?')) {
+          await S.signOut();
+          throw new Error('Entrada cancelada.');
+        }
+        await R.payments.hardClear();
+      }
+      await R.settings.set('syncCursor', null);
+      await R.settings.set('syncUser', session.user_id);
+      await S.markAllDirty();
+    }
+    const r = await S.syncNow();
+    if (r && r.error && !r.offline) throw new Error(r.error);
   }
 
   // ---------- ações ----------
@@ -580,8 +644,51 @@
     async sample() { await R.seedSamples(); render(); },
     async 'clear-samples'() { await R.payments.removeSamples(); render(); },
     async wipe() {
-      if (!confirm('Apagar TODOS os pagamentos deste dispositivo? Esta ação não pode ser desfeita.')) return;
+      const cloud = (await S.info()).email;
+      if (!confirm(cloud ? 'Apagar TODOS os pagamentos? Como tem conta, também serão apagados nos seus outros dispositivos e na nuvem. Não pode ser desfeito.' : 'Apagar TODOS os pagamentos deste dispositivo? Esta ação não pode ser desfeita.')) return;
       await R.wipeEverything(); render();
+    },
+    async 'acc-signup'() {
+      const { email, pass } = accInputs();
+      if (!email || !pass) { accMsg = { type: 'error', text: 'Preencha o email e a palavra-passe.' }; return render(); }
+      if (pass.length < 8) { accMsg = { type: 'error', text: 'A palavra-passe tem de ter pelo menos 8 caracteres.' }; return render(); }
+      try {
+        const r = await S.signUp(email, pass);
+        if (r.session) await afterLogin(r.session);
+        else accMsg = { type: 'ok', text: 'Enviámos um email de confirmação para ' + email + '. Abra o link (veja também o spam) e depois volte aqui para entrar.' };
+      } catch (e) { accFail(e); }
+      render();
+    },
+    async 'acc-signin'() {
+      const { email, pass } = accInputs();
+      if (!email || !pass) { accMsg = { type: 'error', text: 'Preencha o email e a palavra-passe.' }; return render(); }
+      try { await afterLogin(await S.signIn(email, pass)); } catch (e) { accFail(e); }
+      render();
+    },
+    async 'acc-forgot'() {
+      const { email } = accInputs();
+      if (!email) { accMsg = { type: 'error', text: 'Escreva primeiro o seu email.' }; return render(); }
+      try { await S.recover(email); accMsg = { type: 'ok', text: 'Se existir uma conta com esse email, enviámos um link para escolher nova palavra-passe.' }; } catch (e) { accFail(e); }
+      render();
+    },
+    async 'acc-setpass'() {
+      const el = document.getElementById('acc-newpass');
+      const pw = el ? el.value : '';
+      if (pw.length < 8) { accMsg = { type: 'error', text: 'A palavra-passe tem de ter pelo menos 8 caracteres.' }; return render(); }
+      try { await S.updatePassword(pw); recovering = false; accMsg = { type: 'ok', text: 'Palavra-passe alterada.' }; } catch (e) { accFail(e); }
+      render();
+    },
+    async 'acc-sync'() {
+      const r = await S.syncNow();
+      accMsg = r && r.error ? { type: 'error', text: r.offline ? 'Sem ligação à internet.' : r.error } : { type: 'ok', text: 'Sincronizado.' };
+      render();
+    },
+    async 'acc-signout'() { await S.signOut(); accMsg = { type: 'ok', text: 'Saiu da conta. Os dados continuam neste dispositivo.' }; render(); },
+    async 'acc-delete'() {
+      if (!confirm('Apagar a conta e todos os pagamentos guardados na nuvem? Esta ação não pode ser desfeita. Os dados deste dispositivo mantêm-se.')) return;
+      if (!confirm('Tem a certeza? Confirme para apagar a conta definitivamente.')) return;
+      try { await S.deleteAccount(); accMsg = { type: 'ok', text: 'Conta apagada. Os pagamentos deste dispositivo mantêm-se.' }; } catch (e) { accFail(e); }
+      render();
     },
     cancel() { draft = null; }
   };
@@ -636,17 +743,38 @@
 
   window.addEventListener('hashchange', () => { render().then(() => window.scrollTo(0, 0)); });
 
+  window.addEventListener('pagacerto-synced', e => {
+    const route = (location.hash.replace(/^#/, '') || '/').split('/')[1];
+    if (route === 'new' || route === 'edit') return; // não interromper quem está a preencher
+    if (e.detail && e.detail.expired) accMsg = { type: 'error', text: 'A sessão expirou. Entre novamente.' };
+    render();
+  });
+
   // Partilha via PWA (share_target, método GET): ?title=...&text=...
   async function boot() {
+    const ar = await S.handleAuthRedirect().catch(err => ({ kind: 'error', message: err.message }));
+    if (ar) {
+      history.replaceState(null, '', location.pathname + location.search);
+      await R.settings.set('onboarded', true);
+      if (ar.kind === 'error') accMsg = { type: 'error', text: ar.message };
+      else if (ar.kind === 'recovery') recovering = true;
+      else { try { await afterLogin(ar.session); accMsg = { type: 'ok', text: 'Conta confirmada. Sessão iniciada.' }; } catch (err) { accFail(err); } }
+      location.hash = '#/settings';
+      render();
+      S.start();
+      return;
+    }
     const q = new URLSearchParams(location.search);
     const shared = [q.get('text'), q.get('url')].filter(Boolean).join('\n');
     if (shared || q.get('title')) {
       history.replaceState(null, '', location.pathname);
       await R.settings.set('onboarded', true); // veio de uma partilha: não interromper com o ecrã de boas-vindas
       await handleSharedText(shared, q.get('title') || '');
+      S.start();
       return;
     }
     render();
+    S.start();
   }
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {

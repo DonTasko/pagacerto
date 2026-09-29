@@ -66,12 +66,13 @@
   // ---------- valor ----------
   const NUM = '(?:\\d{1,3}(?:\\.\\d{3})+(?:,\\d{1,2})?|\\d+(?:[.,]\\d{1,2})?)';
   const AMOUNT_CUR = new RegExp('(?:€|EUR)\\s*(' + NUM + ')(?![\\d])|(' + NUM + ')\\s*(?:€|EUR\\b|euros?\\b)', 'gi');
-  const AMOUNT_LABELED = new RegExp('(total\\s+a\\s+pagar|valor\\s+a\\s+pagar|montante(?:\\s+a\\s+pagar)?|valor|total)\\s*[:\\-]?\\s*(' + NUM + ')(?![\\d/.\\-])', 'gi');
+  const AMOUNT_LABELED = new RegExp('(total\\s+a\\s+pagar|valor\\s+a\\s+pagar|import[âa]ncia(?:\\s+a\\s+pagar)?|montante(?:\\s+a\\s+pagar)?|valor|total)\\s*[:\\-]?\\s*(' + NUM + ')(?![\\d/.\\-])', 'gi');
+  const MAX_CENTS = 10000000000; // 100 milhões de euros: acima disto é um número de referência, não um valor
 
   function scoreAmountCtx(ctx) {
     let score = 0;
-    if (/total\s+a\s+pagar|valor\s+a\s+pagar|montante\s+a\s+pagar|a\s+pagar/.test(ctx)) score = 6;
-    else if (/montante|valor|total|pagar/.test(ctx)) score = 3;
+    if (/total\s+a\s+pagar|valor\s+a\s+pagar|montante\s+a\s+pagar|import[âa]ncia\s+a\s+pagar|a\s+pagar/.test(ctx)) score = 6;
+    else if (/montante|import[âa]ncia|valor|total|pagar/.test(ctx)) score = 3;
     if (/\biva\b|desconto|juros|taxa|multa|coima|poupan|saldo|anterior/.test(ctx)) score -= 4;
     return score;
   }
@@ -82,14 +83,14 @@
     AMOUNT_CUR.lastIndex = 0;
     while ((m = AMOUNT_CUR.exec(text))) {
       const cents = parseAmountToCents(m[1] || m[2]);
-      if (cents == null) continue;
+      if (cents == null || cents > MAX_CENTS) continue;
       cands.push({ cents, score: scoreAmountCtx(ctxBefore(text, m.index, 35)), index: m.index });
     }
     if (!cands.length) {
       AMOUNT_LABELED.lastIndex = 0;
       while ((m = AMOUNT_LABELED.exec(text))) {
         const cents = parseAmountToCents(m[2]);
-        if (cents == null) continue;
+        if (cents == null || cents > MAX_CENTS) continue;
         cands.push({ cents, score: 1, index: m.index, noCurrency: true });
       }
     }
@@ -163,20 +164,51 @@
 
   const NOT_A_REFERENCE = /tel|telem|telef|contacto|contato|nif|nipc|contribuinte|cliente|contrato|apoio|linha|fax|conta\s+n/;
 
-  function findReference(text, hasEntity) {
-    const labeled = /\b(?:refer[êe]ncia|ref\.?)(?:\s+(?:multibanco|mb|de\s+pagamento|pagamento))?\s*[:\-]?\s*(\d(?:[ .]?\d){8})(?!\d)/i.exec(text);
-    if (labeled) return { value: labeled[1].replace(/\D/g, ''), high: true };
-    if (!hasEntity) return null;
-    const re = /(?<!\d)(\d{3}) (\d{3}) (\d{3})(?!\d)/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const ctx = ctxBefore(text, m.index, 40);
-      if (NOT_A_REFERENCE.test(ctx)) continue;
-      const v = m[1] + m[2] + m[3];
-      if (/^(2|9[1236])/.test(v)) continue; // parece número de telefone
-      return { value: v, high: false };
-    }
+  // Uma sequência de dígitos separada por espaços/pontos só vale se, ao juntar grupos inteiros,
+  // der exatamente 15 (pagamento ao Estado) ou 9 (Multibanco) dígitos. Nunca se corta um número
+  // a meio: "164.835.454.640.565" não pode virar "164835454".
+  function referenceFromRun(run) {
+    const tokens = run.match(/\d+/g) || [];
+    const sums = [];
+    let sum = 0;
+    for (const t of tokens) { sum += t.length; sums.push(sum); }
+    const digits = tokens.join('');
+    if (sums.includes(15)) return { value: digits.slice(0, 15), kind: 'state' };
+    if (sums.includes(9)) return { value: digits.slice(0, 9), kind: 'mb' };
     return null;
+  }
+
+  function findReference(text, hasEntity) {
+    const labeledRe = /\b(?:refer[êe]ncia|ref\.?)(?:\s+(?:multibanco|mb|de\s+pagamento|para\s+pagamento|pagamento))?\s*[:\-]?\s*(\d+(?:[ .]\d+)*)/gi;
+    let m;
+    while ((m = labeledRe.exec(text))) {
+      const r = referenceFromRun(m[1]);
+      if (r) return { value: r.value, kind: r.kind, high: true };
+    }
+    const looksLikePhone = v => /^(2|9[1236])/.test(v);
+    const find = (re, kind) => {
+      let x;
+      while ((x = re.exec(text))) {
+        if (NOT_A_REFERENCE.test(ctxBefore(text, x.index, 40))) continue;
+        const v = x[0].replace(/\D/g, '');
+        if (kind === 'mb' && looksLikePhone(v)) continue;
+        return { value: v, kind, high: false };
+      }
+      return null;
+    };
+    const mb = () => (hasEntity ? find(/(?<!\d)\d{3} \d{3} \d{3}(?!\d)/g, 'mb') : null);
+    const state = () => find(/(?<!\d)\d{3}(?:[. ]\d{3}){4}(?!\d)/g, 'state');
+    return hasEntity ? (mb() || state()) : state();
+  }
+
+  // ---------- descrição (documentos da AT) ----------
+  function findDescription(text) {
+    const m = /PAGAMENTO DE ([A-Z]{2,12})(?: ?- ?MODELO ([A-Z0-9]{1,4}))?/.exec(text);
+    if (!m) return '';
+    let d = 'Pagamento de ' + m[1] + (m[2] ? ' - Modelo ' + m[2] : '');
+    const ex = /exerc[íi]cio\s*[:\-]?\s*(20\d{2})(?!\d)/i.exec(text);
+    if (ex) d += ' · Exercício ' + ex[1];
+    return d;
   }
 
   // ---------- IBAN ----------
@@ -258,7 +290,11 @@
     const inst = findInstallment(text);
     const issuer = findIssuer(text, opts, entity);
 
+    const paymentType = ref && ref.kind === 'state' ? 'state' : (entity || ref) ? 'mb' : '';
+
     const fields = {
+      paymentType,
+      description: findDescription(text),
       issuer: issuer ? issuer.name : '',
       amountCents: amount ? amount.cents : null,
       dueDate: dates.due ? dates.due.iso : '',
@@ -287,6 +323,7 @@
     if (ref && !ref.high) warnings.push('A referência não tinha etiqueta. Confirme se é mesmo a referência Multibanco.');
     if (iban && !iban.valid) warnings.push('O IBAN encontrado não passa a validação. Confirme cada dígito.');
     if (entity && !ref) warnings.push('Foi encontrada a entidade, mas não a referência Multibanco.');
+    if (paymentType === 'state' && !dates.due) warnings.push('Pagamento ao Estado: só precisa da referência e do valor. A data limite não foi encontrada no texto, indique-a.');
 
     return { fields, confidence, warnings };
   }

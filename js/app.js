@@ -14,6 +14,17 @@
   let listFilter = 'open';
 
   const REMIND_LABEL = { 0: 'No próprio dia', 1: '1 dia antes', 3: '3 dias antes', 5: '5 dias antes', 7: '7 dias antes' };
+  const TYPE_LABEL = { mb: 'Multibanco (entidade e referência)', state: 'Pagamento ao Estado (só referência)', other: 'Transferência ou outro' };
+  const STATE_HOWTO = 'No Multibanco: Pagamentos e outros serviços → Estado e sector público → Pagamentos ao Estado. Introduza a referência e confirme o montante.';
+
+  // O browser só oferece "instalar" quando considera a página instalável; guardamos o pedido.
+  let deferredInstall = null;
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    deferredInstall = e;
+    if (location.hash === '#/settings') render();
+  });
+  window.addEventListener('appinstalled', () => { deferredInstall = null; });
 
   // ---------- ponto de entrada para partilha (Android/PWA chamam isto) ----------
   async function handleSharedText(text, subject) {
@@ -22,10 +33,11 @@
     const f = res.fields;
     const p = M.emptyPayment();
     Object.assign(p, {
+      paymentType: f.paymentType || 'mb',
       issuer: f.issuer, amountCents: f.amountCents, dueDate: f.dueDate, entity: f.entity,
       reference: f.reference, iban: f.iban, invoiceNumber: f.invoiceNumber, category: f.category,
       installmentNo: f.installmentNo, installmentTotal: f.installmentTotal,
-      description: subject || ''
+      description: f.description || subject || ''
     });
     draft = { payment: p, confidence: res.confidence, warnings: res.warnings, fromParse: true };
     if (location.hash === '#/new') render(); else location.hash = '#/new';
@@ -127,6 +139,7 @@
     const st = M.effectiveStatus(p);
     const row = (label, val) => val ? `<dt>${label}</dt><dd>${esc(val)}</dd>` : '';
     const paidInfo = p.paidAt ? new Date(p.paidAt).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : '';
+    const type = M.paymentTypeOf(p);
     $app.innerHTML = layout('payments', `
       <a href="#/payments" class="muted">← Pagamentos</a>
       <div class="card" style="margin-top:12px">
@@ -134,9 +147,10 @@
         <div class="amount" style="font-size:28px;margin:6px 0 0">${M.formatEUR(p.amountCents)}</div>
         <dl class="detail" style="margin:0">
           ${row('Vencimento', M.formatDate(p.dueDate))}
+          ${row('Tipo', TYPE_LABEL[type])}
           ${row('Prestação', M.installmentLabel(p))}
-          ${row('Entidade', p.entity)}
-          ${row('Referência', p.reference ? p.reference.replace(/(\d{3})(?=\d)/g, '$1 ') : '')}
+          ${type === 'mb' ? row('Entidade', p.entity) : ''}
+          ${row('Referência', M.formatReference(p.reference))}
           ${row('IBAN', p.iban)}
           ${row('Número da fatura', p.invoiceNumber)}
           ${row('Categoria', p.category)}
@@ -145,6 +159,7 @@
           ${row('Pago em', paidInfo)}
           ${row('Lembretes', (p.remindDays || []).length ? p.remindDays.map(d => REMIND_LABEL[d]).join(', ') : 'Sem lembretes')}
         </dl></div>
+      ${type === 'state' && p.status !== 'paid' ? `<div class="alert blue">${esc(STATE_HOWTO)}</div>` : ''}
       ${p.status === 'paid'
         ? `<button class="btn secondary" data-action="reopen" data-arg="${esc(p.id)}">Reabrir (voltar a pendente)</button>`
         : `<button class="btn green" data-action="pay" data-arg="${esc(p.id)}">Marcar como pago</button>`}
@@ -178,6 +193,7 @@
     const cats = await R.categories.list();
     const low = k => conf[k] === 'low';
     const isInst = !!(p.installmentNo && p.installmentTotal);
+    const ptype = M.paymentTypeOf(p);
 
     const paste = existingId ? '' : `
       <div class="card">
@@ -198,8 +214,11 @@
         ${fieldHtml('f-issuer', 'Nome / Emissor', p.issuer, { parsed, low: low('issuer'), ph: 'Ex.: Vodafone' })}
         ${fieldHtml('f-amount', 'Valor (€)', M.centsToInput(p.amountCents), { parsed, low: low('amountCents'), mode: 'decimal', ph: '0,00' })}
         ${fieldHtml('f-due', 'Data de vencimento', p.dueDate, { parsed, low: low('dueDate'), type: 'date' })}
-        ${fieldHtml('f-entity', 'Entidade (Multibanco, 5 dígitos)', p.entity, { parsed, low: low('entity'), mode: 'numeric' })}
-        ${fieldHtml('f-ref', 'Referência (Multibanco, 9 dígitos)', p.reference ? p.reference.replace(/(\d{3})(?=\d)/g, '$1 ') : '', { parsed, low: low('reference'), mode: 'numeric' })}
+        <label for="f-type">Tipo de pagamento</label>
+        <select id="f-type">${Object.keys(TYPE_LABEL).map(k => `<option value="${k}" ${k === ptype ? 'selected' : ''}>${TYPE_LABEL[k]}</option>`).join('')}</select>
+        <div id="type-hint" class="hint" style="color:var(--muted)"></div>
+        <div id="box-entity">${fieldHtml('f-entity', 'Entidade (Multibanco, 5 dígitos)', p.entity, { parsed: parsed && ptype === 'mb', low: low('entity'), mode: 'numeric' })}</div>
+        ${fieldHtml('f-ref', 'Referência (Multibanco, 9 dígitos)', M.formatReference(p.reference), { parsed, low: low('reference'), mode: 'numeric' })}
         ${fieldHtml('f-iban', 'IBAN (opcional)', p.iban, { parsed: parsed && !!p.iban, low: low('iban') })}
         ${fieldHtml('f-inv', 'Número da fatura (opcional)', p.invoiceNumber, { parsed: parsed && !!p.invoiceNumber, low: low('invoiceNumber') })}
         ${fieldHtml('f-desc', 'Descrição (opcional)', p.description)}
@@ -223,6 +242,18 @@
 
     const inst = document.getElementById('f-inst');
     inst.addEventListener('change', () => { document.getElementById('inst-box').style.display = inst.checked ? '' : 'none'; });
+
+    // O tipo decide que campos aparecem: Multibanco = entidade + referência; Estado = só referência (15 dígitos).
+    const typeSel = document.getElementById('f-type');
+    const applyType = () => {
+      const t = typeSel.value;
+      document.getElementById('box-entity').style.display = t === 'mb' ? '' : 'none';
+      document.querySelector('label[for="f-ref"]').textContent =
+        t === 'mb' ? 'Referência (Multibanco, 9 dígitos)' : t === 'state' ? 'Referência para pagamento (15 dígitos)' : 'Referência (opcional)';
+      document.getElementById('type-hint').textContent = t === 'state' ? STATE_HOWTO : '';
+    };
+    typeSel.addEventListener('change', applyType);
+    applyType();
     document.getElementById('pay-form').addEventListener('submit', e => { e.preventDefault(); savePayment(existingId ? p : null, p); });
   }
 
@@ -236,7 +267,8 @@
     const v = id => document.getElementById(id).value.trim();
     const cents = P.parseAmountToCents(v('f-amount'));
     const due = v('f-due');
-    const entity = v('f-entity').replace(/\s/g, '');
+    const type = v('f-type');
+    const entity = type === 'mb' ? v('f-entity').replace(/\s/g, '') : '';
     const reference = v('f-ref').replace(/[\s.]/g, '');
     const iban = v('f-iban').replace(/\s/g, '').toUpperCase();
     const isInst = document.getElementById('f-inst').checked;
@@ -245,8 +277,10 @@
     if (!v('f-issuer')) return showFormError('Indique o nome de quem emite o pagamento.');
     if (cents == null || cents <= 0) return showFormError('Indique um valor válido, por exemplo 87,43.');
     if (!due) return showFormError('Indique a data de vencimento.');
-    if (entity && !/^\d{5}$/.test(entity)) return showFormError('A entidade Multibanco tem 5 dígitos.');
-    if (reference && !/^\d{9}$/.test(reference)) return showFormError('A referência Multibanco tem 9 dígitos.');
+    if (type === 'mb' && entity && !/^\d{5}$/.test(entity)) return showFormError('A entidade Multibanco tem 5 dígitos.');
+    if (type === 'mb' && reference && !/^\d{9}$/.test(reference)) return showFormError('A referência Multibanco tem 9 dígitos.');
+    if (type === 'state' && !/^\d{15}$/.test(reference)) return showFormError('A referência de um pagamento ao Estado tem 15 dígitos. Confira o documento.');
+    if (type === 'other' && reference && !/^\d+$/.test(reference)) return showFormError('A referência só pode ter dígitos.');
     if (iban && !P.ibanValid(iban)) return showFormError('O IBAN não é válido. Confirme cada dígito ou apague o campo.');
     if (isInst && !(instNo >= 1 && instTotal >= instNo)) return showFormError('Indique a prestação, por exemplo 3 de 12.');
 
@@ -254,7 +288,7 @@
       ? Array.from(document.querySelectorAll('.f-rd:checked')).map(x => +x.value).sort((a, b) => b - a) : [];
 
     const out = Object.assign({}, base, {
-      issuer: v('f-issuer'), amountCents: cents, dueDate: due, entity, reference, iban,
+      issuer: v('f-issuer'), paymentType: type, amountCents: cents, dueDate: due, entity, reference, iban,
       invoiceNumber: v('f-inv'), description: v('f-desc'), category: document.getElementById('f-cat').value,
       notes: v('f-notes'), installmentNo: isInst ? instNo : null, installmentTotal: isInst ? instTotal : null,
       remindDays: remind, status: existing ? existing.status : 'pending'
@@ -269,9 +303,31 @@
   async function viewSettings() {
     const list = await R.payments.list();
     const samples = list.filter(p => p.sample).length;
+
+    // Instalação: mostra o que o browser está a ver, para se perceber porque não aparece "Instalar".
+    const standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+    let swState = 'não suportado neste browser';
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      swState = reg && reg.active ? 'ativo' : 'ainda não ativo';
+    }
+    const ua = navigator.userAgent;
+    const inApp = /FBAN|FBAV|Instagram|GSA\/|; wv\)|Line\//.test(ua);
+    const browser = /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /Edg\//.test(ua) ? 'Edge' : /Firefox/.test(ua) ? 'Firefox' : /Chrome|CriOS/.test(ua) ? 'Chrome' : 'outro';
+    const installHtml = standalone
+      ? '<div class="alert blue">A app já está instalada e a abrir em ecrã inteiro.</div>'
+      : deferredInstall
+        ? '<button class="btn green" data-action="install">Instalar no ecrã inicial</button>'
+        : `<div class="alert">O browser ainda não ofereceu a instalação.</div>
+           <p class="muted">Ligação segura (HTTPS): <b>${window.isSecureContext ? 'sim' : 'não'}</b><br>
+           Service worker: <b>${swState}</b><br>
+           Browser: <b>${browser}${inApp ? ' (parece estar dentro de outra app)' : ''}</b></p>
+           <p class="muted">Abra este endereço diretamente no Chrome (se veio de um link dentro de outra app, copie o endereço e cole no Chrome). Depois procure "Instalar app" no menu ⋮.</p>`;
+
     $app.innerHTML = layout('settings', `
       <h1>Definições</h1>
       <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Os seus pagamentos ficam apenas neste dispositivo. Nada é enviado para servidores e não é pedido acesso ao email nem ao banco.</div>
+      <h2>Instalar</h2>${installHtml}
       <h2>Dados de exemplo</h2>
       ${samples
         ? `<button class="btn secondary" data-action="clear-samples">Remover dados de exemplo (${samples})</button>`
@@ -294,6 +350,13 @@
       await handleSharedText(text, '');
     },
     filter(arg) { listFilter = arg; render(); },
+    async install() {
+      if (!deferredInstall) return;
+      deferredInstall.prompt();
+      await deferredInstall.userChoice;
+      deferredInstall = null;
+      render();
+    },
     async pay(id) { await R.payments.markPaid(id); render(); },
     async reopen(id) { await R.payments.reopen(id); render(); },
     async delete(id) {

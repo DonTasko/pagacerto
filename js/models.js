@@ -133,9 +133,22 @@
     return Array.from({ length: count }, (_, i) => addMonths(firstDate, i * step));
   }
 
+  // Tipo de pagamento: 'mb' (entidade + referência), 'state' (só referência de 15 dígitos, ao Estado),
+  // 'other' (transferência, MB Way, etc.). Pagamentos antigos sem tipo são deduzidos.
+  function paymentTypeOf(p) {
+    if (p.paymentType) return p.paymentType;
+    if (p.entity) return 'mb';
+    if (p.reference && p.reference.length === 15) return 'state';
+    return p.reference ? 'mb' : 'other';
+  }
+
+  function formatReference(ref) {
+    return String(ref || '').replace(/\s/g, '').replace(/(\d{3})(?=\d)/g, '$1 ');
+  }
+
   function emptyPayment() {
     return {
-      id: newId(), issuer: '', amountCents: null, dueDate: '', entity: '', reference: '', iban: '',
+      id: newId(), paymentType: 'mb', issuer: '', amountCents: null, dueDate: '', entity: '', reference: '', iban: '',
       invoiceNumber: '', description: '', category: '', notes: '', installmentNo: null,
       installmentTotal: null, remindDays: [1, 0], status: 'pending', createdAt: new Date().toISOString()
     };
@@ -157,6 +170,6 @@
     CATEGORIES, FREQUENCY_MONTHS, REMIND_OPTIONS, STATUS_LABEL, FREE_LIMIT_ACTIVE_PAYMENTS,
     newId, todayISO, localDateOf, addDays, addMonths, diffDays, effectiveStatus,
     formatEUR, centsToInput, formatDate, formatDayLabel, installmentLabel,
-    generateInstallments, recurringDates, emptyPayment, activeCount
+    generateInstallments, recurringDates, emptyPayment, activeCount, paymentTypeOf, formatReference
   };
 }));

@@ -178,6 +178,22 @@
     return null;
   }
 
+  // Tabelas em colunas: uma linha de cabeçalho com "Entidade" e "Referência" e, por baixo,
+  // a linha de valores ("21385 987 654 321 34,99 EUR").
+  function findTable(text) {
+    const lines = text.split(/\n/);
+    for (let i = 0; i < lines.length - 1; i++) {
+      if (!/entidade/i.test(lines[i]) || !/refer[êe]ncia|\bref\b/i.test(lines[i])) continue;
+      for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
+        const m = /^\s*(\d{5})\s+(\d+(?:[ .]\d+)*)/.exec(lines[j]);
+        if (!m) continue;
+        const r = referenceFromRun(m[2]);
+        if (r && r.kind === 'mb') return { entity: m[1], ref: { value: r.value, kind: 'mb', high: true } };
+      }
+    }
+    return null;
+  }
+
   function findReference(text, hasEntity) {
     const labeledRe = /\b(?:refer[êe]ncia|ref\.?)(?:\s+(?:multibanco|mb|de\s+pagamento|para\s+pagamento|pagamento))?\s*[:\-]?\s*(\d+(?:[ .]\d+)*)/gi;
     let m;
@@ -283,8 +299,12 @@
 
     const amount = findAmount(text);
     const dates = findDates2(text);
-    const entity = findEntity(text);
-    const ref = findReference(text, !!entity);
+    let entity = findEntity(text);
+    let ref = findReference(text, !!entity);
+    if (!entity || !ref) {
+      const tb = findTable(text);
+      if (tb) { entity = entity || tb.entity; ref = ref || tb.ref; }
+    }
     const iban = findIban(text);
     const inv = findInvoiceNumber(text);
     const inst = findInstallment(text);

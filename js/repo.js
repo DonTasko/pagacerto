@@ -9,7 +9,8 @@
   // Sincronização: cada gravação marca o registo com updatedAt e _dirty (por enviar).
   // Apagar não remove: deixa uma "lápide" (deleted:true) para o apagamento chegar aos outros dispositivos.
   const stamp = p => { p.updatedAt = new Date().toISOString(); if (!p.sample) p._dirty = true; return p; };
-  const kick = () => { try { root.PagaSync && root.PagaSync.schedule(); } catch (e) { /* sincronização é opcional */ } };
+  const kick = () => { try { root.PagaSync && root.PagaSync.schedule(); } catch (e) { /* sincronização é opcional */ }
+    try { root.PagaNotify && root.PagaNotify.schedule(); } catch (e) { /* lembretes só na app Android */ } };
   const tombstone = (id) => ({ id, dueDate: '', deleted: true, updatedAt: new Date().toISOString(), _dirty: true });
 
   const payments = {

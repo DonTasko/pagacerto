@@ -8,8 +8,12 @@
   const API = 'https://ubcngppazgiminiivjpj.supabase.co';
   const KEY = 'sb_publishable_ySvViONXKmD82UTC7SW_2w_jyP8_5R6';
   const PAGE = 1000, CHUNK = 200;
-  const R = () => root.PagaRepo, DB = () => root.PagaDB;
-  const siteUrl = () => location.origin + location.pathname;
+  const R = () => root.PagaRepo, DB = () => root.PagaDB, C = () => root.PagaCrypto;
+  // Na app Android a página vive em https://localhost, que o email não consegue abrir: os links do email
+  // (confirmar conta, recuperar palavra-passe) apontam sempre para a versão web publicada.
+  const isNative = () => !!(root.Capacitor && root.Capacitor.isNativePlatform && root.Capacitor.isNativePlatform());
+  const WEB_URL = 'https://dontasko.github.io/pagacerto/';
+  const siteUrl = () => (isNative() ? WEB_URL : location.origin + location.pathname);
 
   class SyncError extends Error {
     constructor(message, code, data) { super(message); this.code = code; this.data = data; }
@@ -88,6 +92,7 @@
   async function signOut() {
     try { const s = await R().settings.get('session', null); if (s) await api('/auth/v1/logout?scope=local', { method: 'POST', token: s.access_token }); } catch (e) { /* offline: sai na mesma */ }
     await clearSession();
+    await clearKey();
   }
   function recover(email) {
     return api('/auth/v1/recover?redirect_to=' + encodeURIComponent(siteUrl()), { method: 'POST', body: { email } });
@@ -103,6 +108,7 @@
     if (!s) throw new SyncError('Sem sessão.', 'expired');
     await api('/rest/v1/rpc/pc_delete_my_account', { method: 'POST', token: s.access_token, body: {} });
     await clearSession();
+    await clearKey();
     await R().settings.set('syncUser', null);
     await R().settings.set('syncCursor', null);
     await R().settings.set('lastSync', null);
@@ -123,6 +129,63 @@
     return { kind: q.get('type') === 'recovery' ? 'recovery' : 'login', session };
   }
 
+  // ---------- encriptação (frase-passe) ----------
+  // A chave derivada (não extraível) fica só neste dispositivo, ligada ao utilizador. Termina sessão = esquece a chave.
+  async function clearKey() { await R().settings.set('cryptoKey', null); }
+  async function getKey(s) {
+    const k = await R().settings.get('cryptoKey', null);
+    return k && k.user === s.user_id ? k.key : null;
+  }
+  async function saveKey(s, key) { await R().settings.set('cryptoKey', { user: s.user_id, key }); }
+  async function fetchKeyMeta(s) {
+    const rows = await api('/rest/v1/pc_keys?select=salt,iterations,verifier&limit=1', { token: s.access_token });
+    return rows && rows[0] ? rows[0] : null;
+  }
+  // 'ready' | 'setup' (ainda não há frase-passe) | 'unlock' (há, falta introduzir aqui) | 'nosession' | 'offline'
+  async function keyStatus() {
+    let s;
+    try { s = await getSession(); } catch (e) { return e.code === 'offline' ? 'offline' : 'nosession'; }
+    if (!s) return 'nosession';
+    if (await getKey(s)) return 'ready';
+    try { return (await fetchKeyMeta(s)) ? 'unlock' : 'setup'; } catch (e) { return e.code === 'offline' ? 'offline' : 'nosession'; }
+  }
+  async function setupPassphrase(pass) {
+    const bad = C().passphraseProblem(pass);
+    if (bad) throw new SyncError(bad, 'weak');
+    const s = await getSession();
+    if (!s) throw new SyncError('Sem sessão.', 'expired');
+    if (await fetchKeyMeta(s)) throw new SyncError('Já existe uma frase-passe nesta conta. Introduza-a para desbloquear.', 'exists');
+    const salt = C().newSalt();
+    const key = await C().deriveKey(pass, salt, C().ITER);
+    await api('/rest/v1/pc_keys', { method: 'POST', token: s.access_token, headers: { Prefer: 'return=minimal' },
+      body: { salt, iterations: C().ITER, verifier: await C().makeVerifier(key) } });
+    await saveKey(s, key);
+    await R().settings.set('syncCursor', null);
+    await markAllDirty(); // volta a enviar tudo, agora cifrado (substitui linhas antigas em claro)
+    return syncNow();
+  }
+  async function unlock(pass) {
+    const s = await getSession();
+    if (!s) throw new SyncError('Sem sessão.', 'expired');
+    const meta = await fetchKeyMeta(s);
+    if (!meta) throw new SyncError('Esta conta ainda não tem frase-passe.', 'nokey');
+    const key = await C().deriveKey(pass, meta.salt, meta.iterations);
+    if (!(await C().checkVerifier(key, meta.verifier))) throw new SyncError('Frase-passe incorreta.', 'badpass');
+    await saveKey(s, key);
+    await R().settings.set('syncCursor', null);
+    return syncNow();
+  }
+  // Frase-passe perdida: apaga no servidor a chave e os pagamentos cifrados, e recomeça com uma nova a partir deste dispositivo.
+  async function resetEncryption(newPass) {
+    const bad = C().passphraseProblem(newPass);
+    if (bad) throw new SyncError(bad, 'weak');
+    const s = await getSession();
+    if (!s) throw new SyncError('Sem sessão.', 'expired');
+    await api('/rest/v1/rpc/pc_reset_encryption', { method: 'POST', token: s.access_token, body: {} });
+    await clearKey();
+    return setupPassphrase(newPass);
+  }
+
   // ---------- sincronização ----------
   async function migrateLocal() {
     const all = await DB().getAll('payments');
@@ -136,11 +199,15 @@
     if (all.length) await DB().putMany('payments', all);
   }
 
-  async function mergeRow(row) {
+  async function mergeRow(row, key) {
     const local = await DB().get('payments', row.id);
     const remoteTs = Date.parse(row.updated_at);
     if (local && local.updatedAt && Date.parse(local.updatedAt) >= remoteTs) return false; // o local é igual ou mais recente
-    const rec = row.deleted ? { id: row.id, dueDate: '' } : Object.assign({}, row.payload, { id: row.id });
+    let payload = row.payload;
+    if (!row.deleted && C().isEncrypted(payload)) {
+      try { payload = await C().decryptJson(key, payload); } catch (e) { return false; } // linha ilegível: ignora
+    }
+    const rec = row.deleted ? { id: row.id, dueDate: '' } : Object.assign({}, payload, { id: row.id });
     if (row.deleted) rec.deleted = true; else delete rec.deleted;
     rec.updatedAt = row.updated_at;
     delete rec._dirty;
@@ -148,10 +215,10 @@
     return true;
   }
 
-  const wire = p => {
+  const wire = async (p, key) => {
     const payload = Object.assign({}, p);
     delete payload._dirty; delete payload.deleted;
-    return { id: p.id, payload: p.deleted ? {} : payload, updated_at: p.updatedAt, deleted: !!p.deleted };
+    return { id: p.id, payload: p.deleted ? {} : await C().encryptJson(key, payload), updated_at: p.updatedAt, deleted: !!p.deleted };
   };
 
   const st = { busy: false, error: '' };
@@ -164,6 +231,8 @@
       try {
         const s = await getSession();
         if (!s) return { skipped: true };
+        const key = await getKey(s);
+        if (!key) return { locked: true }; // sem frase-passe neste dispositivo nada sai nem entra
         st.busy = true; st.error = '';
         await migrateLocal();
 
@@ -173,7 +242,7 @@
           const path = '/rest/v1/pc_payments?select=id,payload,updated_at,deleted,synced_at&order=synced_at.asc&limit=' + PAGE +
             (cursor ? '&synced_at=gte.' + encodeURIComponent(cursor) : '');
           const rows = await api(path, { token: s.access_token });
-          for (const row of rows) { if (await mergeRow(row)) pulled++; }
+          for (const row of rows) { if (await mergeRow(row, key)) pulled++; }
           if (rows.length) { cursor = rows[rows.length - 1].synced_at; await R().settings.set('syncCursor', cursor); }
           if (rows.length < PAGE) break;
         }
@@ -184,7 +253,7 @@
           const chunk = dirty.slice(i, i + CHUNK);
           await api('/rest/v1/pc_payments?on_conflict=id', {
             method: 'POST', token: s.access_token,
-            headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: chunk.map(wire)
+            headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: await Promise.all(chunk.map(p => wire(p, key)))
           });
           for (const p of chunk) {
             const cur = await DB().get('payments', p.id);
@@ -220,5 +289,5 @@
     return syncNow();
   }
 
-  root.PagaSync = { signUp, signIn, signOut, recover, updatePassword, deleteAccount, handleAuthRedirect, syncNow, schedule, info, start, markAllDirty, getSession };
+  root.PagaSync = { signUp, signIn, signOut, recover, updatePassword, deleteAccount, handleAuthRedirect, syncNow, schedule, info, start, markAllDirty, getSession, keyStatus, setupPassphrase, unlock, resetEncryption };
 }(typeof self !== 'undefined' ? self : this));

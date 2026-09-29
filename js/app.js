@@ -3,7 +3,7 @@
  */
 (function () {
   'use strict';
-  const P = window.PagaParser, M = window.PagaModels, R = window.PagaRepo, S = window.PagaSync;
+  const P = window.PagaParser, M = window.PagaModels, R = window.PagaRepo, S = window.PagaSync, N = window.PagaNotify, Pdf = window.PagaPdf;
   const $app = document.getElementById('app');
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -20,6 +20,7 @@
   let histList = [];
   let accMsg = null;             // Conta: { type: 'error'|'ok', text }
   let accEmail = '';             // Conta: email escrito (não se perde ao re-renderizar)
+  let remMsg = null;             // Lembretes: { type, text }
   let recovering = false;        // Conta: veio de um link de recuperação de palavra-passe
 
   const RECUR_TARGET = 12;       // ocorrências por pagar que se mantêm criadas num pagamento recorrente
@@ -54,7 +55,59 @@
     draft = { payment: p, confidence: res.confidence, warnings: res.warnings, fromParse: true };
     if (location.hash === '#/new') render(); else location.hash = '#/new';
   }
-  window.PagaApp = { handleSharedText };
+
+  // ---------- importar PDF ----------
+  const askPdfPassword = wrong => prompt(wrong ? 'Palavra-passe incorreta. Tente outra vez:' : 'Este PDF tem palavra-passe. Introduza-a para o ler:');
+
+  async function importPdfBytes(bytes, name) {
+    const status = document.getElementById('pdf-status');
+    if (status) status.textContent = 'A ler o PDF…';
+    let warning = null;
+    try {
+      const text = await Pdf.extractText(bytes, askPdfPassword);
+      if (text) { await handleSharedText(text, String(name || '').replace(/\.pdf$/i, '')); return; }
+      warning = 'Este PDF não tem texto (parece uma imagem digitalizada). Por agora escreva os dados à mão. A leitura de fotografias chega numa próxima versão.';
+    } catch (e) {
+      warning = e && e.message ? e.message : 'Não foi possível ler o PDF.';
+    }
+    draft = { payment: M.emptyPayment(), confidence: {}, warnings: [warning], fromParse: false };
+    if (location.hash === '#/new') render(); else location.hash = '#/new';
+  }
+
+  function b64ToBytes(b64) {
+    const bin = atob(b64), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  document.addEventListener('change', e => {
+    if (!e.target || e.target.id !== 'f-pdf') return;
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > 15 * 1024 * 1024) return showFormError('O PDF é demasiado grande (máximo 15 MB).');
+    f.arrayBuffer().then(buf => importPdfBytes(buf, f.name)).catch(showFatal);
+  });
+
+  // Android: o texto partilhado fica guardado no código nativo até a parte web o pedir.
+  async function checkNativeShare() {
+    const cap = window.Capacitor;
+    if (!(cap && cap.isNativePlatform && cap.isNativePlatform() && cap.Plugins && cap.Plugins.PagaShare)) return false;
+    const r = await cap.Plugins.PagaShare.take();
+    if (r && (r.pdf || r.pdfError)) {
+      await R.settings.set('onboarded', true);
+      if (r.pdfError) { draft = { payment: M.emptyPayment(), confidence: {}, warnings: [r.pdfError], fromParse: false }; if (location.hash === '#/new') render(); else location.hash = '#/new'; }
+      else await importPdfBytes(b64ToBytes(r.pdf), r.name || '');
+      return true;
+    }
+    if (r && r.text) {
+      await R.settings.set('onboarded', true);
+      await handleSharedText(r.text, r.subject || '');
+      return true;
+    }
+    return false;
+  }
+  window.PagaApp = { handleSharedText, checkNativeShare };
 
   // ---------- peças de UI ----------
   function layout(active, inner, opts) {
@@ -241,7 +294,7 @@
       if (!p) { location.hash = '#/payments'; return; }
     } else if (draft) {
       ({ payment: p, confidence: conf, warnings } = draft);
-      parsed = true;
+      parsed = draft.fromParse !== false;
     } else {
       p = M.emptyPayment();
     }
@@ -255,6 +308,9 @@
         <label for="f-paste" style="margin-top:0">Colar texto da fatura</label>
         <textarea id="f-paste" placeholder="Cole aqui o texto do email ou da fatura. O PagaCerto tenta preencher os campos, e você confirma."></textarea>
         <button class="btn secondary small" data-action="parse">Reconhecer dados</button>
+        <label class="btn secondary small" for="f-pdf" style="cursor:pointer">📄 Importar PDF</label>
+        <input id="f-pdf" type="file" accept="application/pdf,.pdf" style="display:none">
+        <div id="pdf-status" class="hint" style="color:var(--muted)"></div>
       </div>`;
 
     const found = parsed ? `<div class="alert blue"><b>PAGAMENTO ENCONTRADO</b><br>Confira cada campo antes de guardar. Os campos a laranja precisam da sua confirmação.</div>` : '';
@@ -524,18 +580,43 @@
 
     $app.innerHTML = layout('settings', `
       <h1>Definições</h1>
-      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem. Nunca é pedido acesso ao seu email nem ao banco.</div>
+      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem, cifrados com uma frase-passe só sua. Nunca é pedido acesso ao seu email nem ao banco.<br><a href="privacidade.html">Política de Privacidade</a> · <a href="termos.html">Termos de Utilização</a></div>
+      ${await reminderHtml()}
       ${await accountHtml()}
-      <h2>Instalar</h2>${installHtml}
+      ${N.isNative() ? '' : '<h2>Instalar</h2>' + installHtml}
       <h2>Dados de exemplo</h2>
       ${samples
         ? `<button class="btn secondary" data-action="clear-samples">Remover dados de exemplo (${samples})</button>`
         : `<button class="btn secondary" data-action="sample">Carregar dados de exemplo</button>`}
       <h2>Dados</h2>
       <button class="btn danger" data-action="wipe">Apagar todos os dados</button>
-      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.3 (conta e sincronização)</p>`);
+      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.5 (PDF e cifragem)</p>`);
   }
 
+
+
+  // ----- Lembretes (só na app Android) -----
+  async function reminderHtml() {
+    const msg = remMsg ? `<div class="${remMsg.type === 'error' ? 'error' : 'alert blue'}">${esc(remMsg.text)}</div>` : '';
+    remMsg = null;
+    const st = await N.status();
+    if (!st.native) {
+      return `<h2>Lembretes</h2>${msg}<div class="alert">Os lembretes funcionam na app Android. No browser não são fiáveis, porque o browser não acorda em segundo plano.</div>`;
+    }
+    const on = await R.settings.get('remindersOn', true);
+    const hour = await R.settings.get('remindHour', 9);
+    if (!st.granted) {
+      return `<h2>Lembretes</h2>${msg}<div class="alert">As notificações estão desligadas. Sem elas a app não o pode avisar.</div>
+        <button class="btn green" data-action="rem-perm">Permitir notificações</button>`;
+    }
+    const opts = Array.from({ length: 16 }, (_, i) => i + 6).map(h => `<option value="${h}" ${h === hour ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+    return `<h2>Lembretes</h2>${msg}
+      <p class="muted">${on ? st.pending + ' lembrete(s) agendado(s).' : 'Lembretes desligados.'}</p>
+      <label for="rem-hour">Hora dos avisos</label>
+      <select id="rem-hour" data-bind="rem-hour">${opts}</select>
+      <button class="btn secondary" data-action="rem-toggle">${on ? 'Desligar lembretes' : 'Ligar lembretes'}</button>
+      <button class="btn secondary small" data-action="rem-test">Enviar notificação de teste</button>`;
+  }
 
   // ----- Conta e sincronização (opcional) -----
   async function accountHtml() {
@@ -550,6 +631,11 @@
         <button class="btn" data-action="acc-setpass">Guardar palavra-passe</button>`;
     }
     if (info.email) {
+      const ks = await S.keyStatus();
+      if (ks === 'setup' || ks === 'unlock') return `<h2>Conta e sincronização</h2>${msg}
+        <div class="card"><b>${esc(info.email)}</b></div>
+        ${keyPanelHtml(ks)}
+        <button class="btn small secondary" data-action="acc-signout">Sair da conta</button>`;
       const last = info.lastSync ? new Date(info.lastSync).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : 'ainda não';
       return `<h2>Conta e sincronização</h2>${msg}
         <div class="card"><b>${esc(info.email)}</b><br><span class="muted">Última sincronização: ${esc(last)}${info.error ? '<br>' + esc(info.error) : ''}</span></div>
@@ -567,6 +653,26 @@
       <button class="btn" data-action="acc-signin">Entrar</button>
       <button class="btn secondary" data-action="acc-signup">Criar conta</button>
       <button class="btn small secondary" data-action="acc-forgot">Esqueci a palavra-passe</button>`;
+  }
+
+  let showReset = false;
+  function keyPanelHtml(ks) {
+    const warn = `<div class="alert"><b>Atenção:</b> a frase-passe não pode ser recuperada por nós. Se a perder, os dados guardados na nuvem ficam ilegíveis (os dispositivos onde já entrou mantêm os seus dados).</div>`;
+    if (ks === 'setup' || showReset) {
+      return `<div class="alert blue">${showReset ? 'Vai apagar os dados cifrados na nuvem e criar uma nova frase-passe. Os pagamentos deste dispositivo voltam a ser enviados.' : 'Para proteger os seus pagamentos, escolha uma <b>frase-passe</b>. Os dados são cifrados neste dispositivo antes de irem para a nuvem: nem nós os conseguimos ler.'}</div>
+        ${warn}
+        <label for="acc-pp1">Frase-passe (mínimo 10 caracteres)</label>
+        <input id="acc-pp1" type="password" autocomplete="new-password">
+        <label for="acc-pp2">Repita a frase-passe</label>
+        <input id="acc-pp2" type="password" autocomplete="new-password">
+        <button class="btn" data-action="${showReset ? 'acc-keyreset' : 'acc-keysetup'}">${showReset ? 'Apagar nuvem e criar nova frase-passe' : 'Ativar cifragem e sincronizar'}</button>
+        ${showReset ? '<button class="btn small secondary" data-action="acc-keyresetcancel">Cancelar</button>' : ''}`;
+    }
+    return `<div class="alert blue">Introduza a frase-passe desta conta para ver e sincronizar os seus pagamentos neste dispositivo.</div>
+      <label for="acc-pp1">Frase-passe</label>
+      <input id="acc-pp1" type="password" autocomplete="current-password">
+      <button class="btn" data-action="acc-keyunlock">Desbloquear</button>
+      <button class="btn small secondary" data-action="acc-keyresetask">Perdi a frase-passe</button>`;
   }
 
   const accInputs = () => {
@@ -648,6 +754,20 @@
       if (!confirm(cloud ? 'Apagar TODOS os pagamentos? Como tem conta, também serão apagados nos seus outros dispositivos e na nuvem. Não pode ser desfeito.' : 'Apagar TODOS os pagamentos deste dispositivo? Esta ação não pode ser desfeita.')) return;
       await R.wipeEverything(); render();
     },
+    async 'rem-perm'() {
+      const ok = await N.requestPermission();
+      remMsg = ok ? { type: 'ok', text: 'Notificações permitidas.' } : { type: 'error', text: 'Permissão recusada. Ative em Definições do Android → Apps → PagaCerto → Notificações.' };
+      await N.apply(); render();
+    },
+    async 'rem-toggle'() {
+      await R.settings.set('remindersOn', !(await R.settings.get('remindersOn', true)));
+      await N.apply(); render();
+    },
+    async 'rem-test'() {
+      const ok = await N.sendTest();
+      remMsg = ok ? { type: 'ok', text: 'Vai receber uma notificação daqui a 5 segundos. Pode sair da app para ver como aparece.' } : { type: 'error', text: 'Sem permissão para notificações.' };
+      render();
+    },
     async 'acc-signup'() {
       const { email, pass } = accInputs();
       if (!email || !pass) { accMsg = { type: 'error', text: 'Preencha o email e a palavra-passe.' }; return render(); }
@@ -678,12 +798,32 @@
       try { await S.updatePassword(pw); recovering = false; accMsg = { type: 'ok', text: 'Palavra-passe alterada.' }; } catch (e) { accFail(e); }
       render();
     },
+    async 'acc-keysetup'() {
+      const a = (document.getElementById('acc-pp1') || {}).value || '', b = (document.getElementById('acc-pp2') || {}).value || '';
+      if (a !== b) { accMsg = { type: 'error', text: 'As duas frases-passe não coincidem.' }; return render(); }
+      try { await S.setupPassphrase(a); accMsg = { type: 'ok', text: 'Cifragem ativada. Guarde a frase-passe num local seguro.' }; } catch (e) { accFail(e); }
+      render();
+    },
+    async 'acc-keyunlock'() {
+      const a = (document.getElementById('acc-pp1') || {}).value || '';
+      try { await S.unlock(a); accMsg = { type: 'ok', text: 'Desbloqueado. Dados sincronizados.' }; } catch (e) { accFail(e); }
+      render();
+    },
+    'acc-keyresetask'() { showReset = true; render(); },
+    'acc-keyresetcancel'() { showReset = false; render(); },
+    async 'acc-keyreset'() {
+      const a = (document.getElementById('acc-pp1') || {}).value || '', b = (document.getElementById('acc-pp2') || {}).value || '';
+      if (a !== b) { accMsg = { type: 'error', text: 'As duas frases-passe não coincidem.' }; return render(); }
+      if (!confirm('Isto apaga TODOS os pagamentos guardados na nuvem e recomeça com a nova frase-passe. Só os dados que existirem neste dispositivo voltam a ser enviados. Continuar?')) return;
+      try { await S.resetEncryption(a); showReset = false; accMsg = { type: 'ok', text: 'Nova frase-passe criada.' }; } catch (e) { accFail(e); }
+      render();
+    },
     async 'acc-sync'() {
       const r = await S.syncNow();
       accMsg = r && r.error ? { type: 'error', text: r.offline ? 'Sem ligação à internet.' : r.error } : { type: 'ok', text: 'Sincronizado.' };
       render();
     },
-    async 'acc-signout'() { await S.signOut(); accMsg = { type: 'ok', text: 'Saiu da conta. Os dados continuam neste dispositivo.' }; render(); },
+    async 'acc-signout'() { await S.signOut(); showReset = false; accMsg = { type: 'ok', text: 'Saiu da conta. Os dados continuam neste dispositivo.' }; render(); },
     async 'acc-delete'() {
       if (!confirm('Apagar a conta e todos os pagamentos guardados na nuvem? Esta ação não pode ser desfeita. Os dados deste dispositivo mantêm-se.')) return;
       if (!confirm('Tem a certeza? Confirme para apagar a conta definitivamente.')) return;
@@ -708,7 +848,8 @@
     'hist-q'(val) { hist.q = val; document.getElementById('hist-body').innerHTML = historyBody(); },
     'hist-month'(val) { hist.month = val; render(); },
     'hist-issuer'(val) { hist.issuer = val; render(); },
-    'hist-cat'(val) { hist.category = val; render(); }
+    'hist-cat'(val) { hist.category = val; render(); },
+    'rem-hour'(val) { R.settings.set('remindHour', Number(val)).then(() => N.apply()).then(render); }
   };
   document.addEventListener('input', e => {
     const b = e.target.dataset && e.target.dataset.bind;
@@ -746,9 +887,12 @@
   window.addEventListener('pagacerto-synced', e => {
     const route = (location.hash.replace(/^#/, '') || '/').split('/')[1];
     if (route === 'new' || route === 'edit') return; // não interromper quem está a preencher
+    N.schedule();
     if (e.detail && e.detail.expired) accMsg = { type: 'error', text: 'A sessão expirou. Entre novamente.' };
     render();
   });
+
+  function startServices() { S.start(); N.start(); }
 
   // Partilha via PWA (share_target, método GET): ?title=...&text=...
   async function boot() {
@@ -761,7 +905,7 @@
       else { try { await afterLogin(ar.session); accMsg = { type: 'ok', text: 'Conta confirmada. Sessão iniciada.' }; } catch (err) { accFail(err); } }
       location.hash = '#/settings';
       render();
-      S.start();
+      startServices();
       return;
     }
     const q = new URLSearchParams(location.search);
@@ -770,14 +914,15 @@
       history.replaceState(null, '', location.pathname);
       await R.settings.set('onboarded', true); // veio de uma partilha: não interromper com o ecrã de boas-vindas
       await handleSharedText(shared, q.get('title') || '');
-      S.start();
+      startServices();
       return;
     }
+    if (await checkNativeShare()) { startServices(); return; }
     render();
-    S.start();
+    startServices();
   }
 
-  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol) && !N.isNative()) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   boot().catch(showFatal);

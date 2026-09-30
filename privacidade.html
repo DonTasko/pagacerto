@@ -24,9 +24,9 @@
 
 <h2>2. Em resumo</h2>
 <ul>
-  <li>Sem conta, tudo fica <b>apenas no seu dispositivo</b>. Não recebemos nada.</li>
+  <li>Sem conta, os seus pagamentos ficam <b>apenas no seu dispositivo</b>. Não os recebemos.</li>
   <li>Com conta (opcional), os seus pagamentos são <b>cifrados no seu dispositivo</b> com uma frase-passe que só você conhece, antes de serem enviados para a nuvem. Nós não os conseguimos ler.</li>
-  <li>Não usamos publicidade, nem análise de comportamento, nem vendemos dados.</li>
+  <li>A app Android gratuita mostra anúncios (Google AdMob), só depois do seu consentimento. Os seus pagamentos <b>nunca</b> são usados para escolher anúncios. Não vendemos dados.</li>
   <li>Não pedimos acesso ao seu email, contactos, localização ou conta bancária.</li>
 </ul>
 
@@ -38,6 +38,7 @@
 <tr><td>Email e palavra-passe (só com conta)</td><td>Serviço de autenticação (Supabase). A palavra-passe é guardada com hash.</td><td>Entrar na conta e recuperar o acesso.</td></tr>
 <tr><td>Metadados de sincronização: identificador do registo, data da última alteração, indicador de apagado</td><td>Nuvem, <b>não cifrados</b>.</td><td>Sincronizar entre dispositivos.</td></tr>
 <tr><td>Sal e verificador da frase-passe</td><td>Nuvem.</td><td>Permitir validar a frase-passe noutro dispositivo. Não permitem decifrar os dados.</td></tr>
+<tr><td>Dados de anúncios (identificador de publicidade, IP, dados do dispositivo) — só na versão gratuita e conforme o seu consentimento</td><td>Tratados pela Google (AdMob).</td><td>Mostrar e medir anúncios.</td></tr>
 <tr><td>Definições (hora do lembrete, etc.)</td><td>No dispositivo.</td><td>Funcionamento da app.</td></tr>
 </table>
 <p>A frase-passe e a chave derivada <b>nunca saem do seu dispositivo</b>. A chave fica guardada localmente até terminar sessão.</p>
@@ -46,8 +47,13 @@
 <p>Execução do serviço que pediu (art. 6.º, n.º 1, alínea b) do RGPD) para a conta e a sincronização; interesse legítimo (alínea f) para segurança e prevenção de abuso. Não tratamos categorias especiais de dados de forma intencional; evite escrever dados de saúde ou semelhantes nas notas.</p>
 
 <h2>5. Subcontratantes e transferências</h2>
-<p>Usamos a <b>Supabase</b> (alojamento e autenticação), com base de dados na região de Londres (Reino Unido). O Reino Unido beneficia de uma decisão de adequação da Comissão Europeia, pelo que a transferência é feita ao abrigo dela. Não partilhamos dados com terceiros para marketing.</p>
+<p>Usamos a <b>Supabase</b> (alojamento e autenticação), com base de dados na região de Londres (Reino Unido). O Reino Unido beneficia de uma decisão de adequação da Comissão Europeia, pelo que a transferência é feita ao abrigo dela. Fora a Google (anúncios, ver 5-A), não partilhamos dados com terceiros para marketing.</p>
 <p>Se usar «Adicionar ao Google Calendar», abre-se uma ligação no Google com o título e a data que escolheu; a partir daí aplica-se a política do Google. Os emails de confirmação são enviados por um serviço de email transacional <span class="ph">[indicar o fornecedor quando configurado]</span>.</p>
+
+<h2>5-A. Anúncios (versão gratuita da app Android)</h2>
+<p>A versão gratuita usa o <b>Google AdMob</b> para mostrar um banner e, ocasionalmente, um anúncio de ecrã inteiro. Para isso, a Google pode recolher e tratar no seu dispositivo dados como identificador de publicidade, endereço IP, dados do dispositivo e da interação com os anúncios, para servir e medir anúncios e prevenir fraude. A Google atua como responsável pelo tratamento desses dados, nos termos da <a href="https://policies.google.com/technologies/partner-sites">política da Google</a>.</p>
+<p>No Espaço Económico Europeu e no Reino Unido, mostramos primeiro o formulário de consentimento da Google (UMP). Sem consentimento, não são pedidos anúncios personalizados. Pode alterar a escolha em Definições → Anúncios → «Preferências de anúncios e privacidade», e repor o identificador de publicidade nas definições do Android. Os dados dos seus pagamentos não são enviados à Google.</p>
+<p>Uma futura versão paga poderá remover os anúncios.</p>
 
 <h2>6. Quanto tempo guardamos</h2>
 <p>Enquanto a conta existir. Se apagar a conta (Definições → Conta → Apagar), removemos a conta, os pagamentos cifrados e a chave da nuvem de imediato. Cópias de segurança do fornecedor podem persistir por um período limitado, até <span class="ph">[N] dias</span>. Os dados no dispositivo só se apagam pela app («Apagar tudo») ou desinstalando-a.</p>

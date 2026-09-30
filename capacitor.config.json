@@ -1,0 +1,10 @@
+{
+  "appId": "pt.lapps.pagacerto",
+  "appName": "PagaCerto",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "android": { "allowMixedContent": false },
+  "plugins": {
+    "LocalNotifications": { "smallIcon": "ic_stat_pagacerto", "iconColor": "#1f9d55" }
+  }
+}

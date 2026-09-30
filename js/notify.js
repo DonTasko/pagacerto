@@ -55,6 +55,18 @@
     return out.slice(0, MAX_SCHEDULED);
   }
 
+  // ---------- resumo para os widgets do ecrã inicial ----------
+  // Só pagamentos por pagar (sem exemplos), por vencimento; o lado nativo calcula atraso e dias com a data de hoje.
+  const WIDGET_MAX = 60;
+  function widgetSnapshot(payments) {
+    const items = (payments || [])
+      .filter(p => !p.sample && !p.deleted && p.status !== 'paid' && /^\d{4}-\d{2}-\d{2}$/.test(p.dueDate || ''))
+      .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0))
+      .slice(0, WIDGET_MAX)
+      .map(p => ({ i: String(p.issuer || p.description || '').slice(0, 32), c: p.amountCents || 0, d: p.dueDate }));
+    return { v: 1, items };
+  }
+
   // ---------- parte nativa (só no browser, dentro da app Android) ----------
   const cap = () => (typeof window !== 'undefined' ? window.Capacitor : null);
   const isNative = () => !!(cap() && cap().isNativePlatform && cap().isNativePlatform());
@@ -97,10 +109,20 @@
     return { granted: true, scheduled: list.length };
   }
 
+  async function pushWidget() {
+    if (!isNative() || !cap().Plugins.PagaShare || !cap().Plugins.PagaShare.setWidget) return false;
+    const snap = widgetSnapshot(await window.PagaRepo.payments.list());
+    await cap().Plugins.PagaShare.setWidget({ json: JSON.stringify(snap) });
+    return true;
+  }
+
   function schedule() {
     if (!isNative()) return;
     clearTimeout(timer);
-    timer = setTimeout(() => { apply().catch(e => console.error('lembretes:', e)); }, 1500);
+    timer = setTimeout(() => {
+      apply().catch(e => console.error('lembretes:', e));
+      pushWidget().catch(e => console.error('widget:', e));
+    }, 1500);
   }
 
   async function sendTest() {
@@ -125,5 +147,5 @@
     schedule();
   }
 
-  return { plan, notifId, isNative, status, requestPermission, apply, schedule, sendTest, start };
+  return { widgetSnapshot, pushWidget, plan, notifId, isNative, status, requestPermission, apply, schedule, sendTest, start };
 }));

@@ -470,6 +470,7 @@
     }
     if (entity) await R.entities.remember(entity, out.issuer); // aprende "12345 = EDP"
     draft = null;
+    if (!existing && window.PagaAds) window.PagaAds.onSaved().catch(() => {}); // anúncio de ecrã inteiro a cada N novos
     location.hash = existing ? '#/p/' + out.id : '#/';
   }
 
@@ -580,8 +581,9 @@
 
     $app.innerHTML = layout('settings', `
       <h1>Definições</h1>
-      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem, cifrados com uma frase-passe só sua. Nunca é pedido acesso ao seu email nem ao banco.<br><a href="privacidade.html">Política de Privacidade</a> · <a href="termos.html">Termos de Utilização</a></div>
+      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem, cifrados com uma frase-passe só sua. Nunca é pedido acesso ao seu email nem ao banco. Na app Android gratuita há anúncios (Google AdMob), sujeitos ao seu consentimento.<br><a href="privacidade.html">Política de Privacidade</a> · <a href="termos.html">Termos de Utilização</a></div>
       ${await reminderHtml()}
+      ${await adsHtml()}
       ${await accountHtml()}
       ${N.isNative() ? '' : '<h2>Instalar</h2>' + installHtml}
       <h2>Dados de exemplo</h2>
@@ -590,10 +592,20 @@
         : `<button class="btn secondary" data-action="sample">Carregar dados de exemplo</button>`}
       <h2>Dados</h2>
       <button class="btn danger" data-action="wipe">Apagar todos os dados</button>
-      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.5 (PDF e cifragem)</p>`);
+      <p class="muted" style="margin-top:18px">PagaCerto · versão 0.7 (versão gratuita)</p>`);
   }
 
 
+
+  // ----- Anúncios (só na app Android gratuita) -----
+  async function adsHtml() {
+    if (!window.PagaAds || !window.PagaAds.isNative()) return '';
+    const st = await window.PagaAds.state();
+    if (!st.available || !st.enabled) return '';
+    return `<h2>Anúncios</h2>
+      <p class="muted">A versão gratuita mostra um banner em baixo e, de vez em quando, um anúncio de ecrã inteiro depois de guardar pagamentos. Os seus pagamentos nunca são usados para escolher anúncios.</p>
+      ${st.privacyOptionsRequired ? '<button class="btn secondary small" data-action="ads-privacy">Preferências de anúncios e privacidade</button>' : ''}`;
+  }
 
   // ----- Lembretes (só na app Android) -----
   async function reminderHtml() {
@@ -763,6 +775,7 @@
       await R.settings.set('remindersOn', !(await R.settings.get('remindersOn', true)));
       await N.apply(); render();
     },
+    async 'ads-privacy'() { await window.PagaAds.privacyOptions(); },
     async 'rem-test'() {
       const ok = await N.sendTest();
       remMsg = ok ? { type: 'ok', text: 'Vai receber uma notificação daqui a 5 segundos. Pode sair da app para ver como aparece.' } : { type: 'error', text: 'Sem permissão para notificações.' };
@@ -892,7 +905,7 @@
     render();
   });
 
-  function startServices() { S.start(); N.start(); }
+  function startServices() { S.start(); N.start(); if (window.PagaAds) window.PagaAds.sync().catch(() => {}); }
 
   // Partilha via PWA (share_target, método GET): ?title=...&text=...
   async function boot() {

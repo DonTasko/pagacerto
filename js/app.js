@@ -581,7 +581,7 @@
 
     $app.innerHTML = layout('settings', `
       <h1>Definições</h1>
-      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem, cifrados com uma frase-passe só sua. Nunca é pedido acesso ao seu email nem ao banco. Na app Android gratuita há anúncios (Google AdMob), sujeitos ao seu consentimento.<br><a href="privacidade.html">Política de Privacidade</a> · <a href="termos.html">Termos de Utilização</a></div>
+      <div class="alert blue" style="margin-top:14px"><b>Privacidade</b><br>Por omissão, os seus pagamentos ficam apenas neste dispositivo. Só se criar conta (opcional) é que são guardados na nuvem, cifrados com uma frase-passe só sua. Nunca é pedido acesso ao seu email nem ao banco. Na app Android gratuita há anúncios (Google AdMob), sujeitos ao seu consentimento.<br><a href="https://dontasko.github.io/pagacerto/privacidade.html">Política de Privacidade</a> · <a href="https://dontasko.github.io/pagacerto/termos.html">Termos de Utilização</a></div>
       ${await reminderHtml()}
       ${await adsHtml()}
       ${await accountHtml()}

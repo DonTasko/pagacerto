@@ -8,6 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function (M) {
   'use strict';
 
+  const tr = (k, p) => (typeof self !== 'undefined' && self.PagaI18n ? self.PagaI18n.t(k, p) : (p ? k.replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
   const MAX_SCHEDULED = 60;   // margem de segurança nos limites do sistema
   const CHANNEL = 'pagamentos';
 
@@ -25,10 +26,10 @@
   }
 
   function body(p, days) {
-    if (days === -1) return 'Em atraso desde ' + M.formatDate(p.dueDate) + '. Abra a app para pagar ou marcar como pago.';
-    if (days === 0) return 'Vence hoje (' + M.formatDate(p.dueDate) + ').';
-    if (days === 1) return 'Vence amanhã (' + M.formatDate(p.dueDate) + ').';
-    return 'Vence em ' + days + ' dias (' + M.formatDate(p.dueDate) + ').';
+    if (days === -1) return tr('Em atraso desde {date}. Abra a app para pagar ou marcar como pago.', { date: M.formatDate(p.dueDate) });
+    if (days === 0) return tr('Vence hoje ({date}).', { date: M.formatDate(p.dueDate) });
+    if (days === 1) return tr('Vence amanhã ({date}).', { date: M.formatDate(p.dueDate) });
+    return tr('Vence em {n} dias ({date}).', { n: days, date: M.formatDate(p.dueDate) });
   }
 
   // payments -> [{ id, paymentId, at: Date, title, body }] (só o futuro, por ordem, no máximo MAX_SCHEDULED)
@@ -42,7 +43,7 @@
       const days = (p.remindDays || []).filter(n => Number.isInteger(n) && n >= 0);
       if (!days.length) continue;                       // "Criar lembrete" desligado
       const inst = M.installmentLabel(p);
-      const title = (p.issuer || 'Pagamento') + ' · ' + M.formatEUR(p.amountCents) + (inst ? ' · ' + inst.toLowerCase() : '');
+      const title = (p.issuer || tr('Pagamento')) + ' · ' + M.formatEUR(p.amountCents) + (inst ? ' · ' + inst.toLowerCase() : '');
       const all = Array.from(new Set(days)).concat([-1]); // -1 = aviso de atraso
       for (const d of all) {
         const dayISO = d === -1 ? M.addDays(p.dueDate, 1) : M.addDays(p.dueDate, -d);
@@ -97,7 +98,7 @@
     if (!(await R.settings.get('remindersOn', true))) return { granted: true, scheduled: 0 };
     const hour = await R.settings.get('remindHour', 9);
     const list = plan(await R.payments.list(), { hour });
-    try { await LN().createChannel({ id: CHANNEL, name: 'Pagamentos', description: 'Lembretes de pagamentos', importance: 4, visibility: 0 }); } catch (e) { /* já existe */ }
+    try { await LN().createChannel({ id: CHANNEL, name: tr('Pagamentos'), description: tr('Lembretes de pagamentos'), importance: 4, visibility: 0 }); } catch (e) { /* já existe */ }
     if (list.length) {
       await LN().schedule({
         notifications: list.map(n => ({
@@ -127,9 +128,9 @@
 
   async function sendTest() {
     if (!(await requestPermission())) return false;
-    try { await LN().createChannel({ id: CHANNEL, name: 'Pagamentos', description: 'Lembretes de pagamentos', importance: 4, visibility: 0 }); } catch (e) { /* já existe */ }
+    try { await LN().createChannel({ id: CHANNEL, name: tr('Pagamentos'), description: tr('Lembretes de pagamentos'), importance: 4, visibility: 0 }); } catch (e) { /* já existe */ }
     await LN().schedule({ notifications: [{
-      id: 2147483000, title: 'PagaCerto', body: 'Assim vão aparecer os seus lembretes.', channelId: CHANNEL,
+      id: 2147483000, title: 'PagaCerto', body: tr('Assim vão aparecer os seus lembretes.'), channelId: CHANNEL,
       smallIcon: 'ic_stat_pagacerto', schedule: { at: new Date(Date.now() + 5000), allowWhileIdle: true }
     }] });
     return true;

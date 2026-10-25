@@ -8,6 +8,9 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
+  const G = typeof self !== 'undefined' ? self : globalThis;
+  const tr = (k, p) => (G.PagaI18n ? G.PagaI18n.t(k, p) : k);   // textos visíveis passam por aqui (PT é a chave)
+  const loc = () => (G.PagaI18n ? G.PagaI18n.locale() : 'pt-PT');
   const pad = n => String(n).padStart(2, '0');
   const fmt = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
 
@@ -68,9 +71,9 @@
   function formatEUR(cents) {
     const v = (cents || 0) / 100;
     try {
-      return new Intl.NumberFormat('pt-PT', { style: 'currency', currency: 'EUR' }).format(v);
+      return new Intl.NumberFormat(loc(), { style: 'currency', currency: 'EUR' }).format(v);
     } catch (e) {
-      return v.toFixed(2).replace('.', ',') + ' €';
+      return (loc() === 'pt-PT' ? v.toFixed(2).replace('.', ',') : v.toFixed(2)) + ' €';
     }
   }
 
@@ -87,14 +90,14 @@
   const MONTH_SHORT = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
   function formatDayLabel(iso, today) {
     const diff = diffDays(iso, today || todayISO());
-    if (diff === 0) return 'HOJE';
-    if (diff === 1) return 'AMANHÃ';
+    if (diff === 0) return tr('HOJE');
+    if (diff === 1) return tr('AMANHÃ');
     const [, m, d] = parts(iso);
-    return `${d} ${MONTH_SHORT[m - 1]}`;
+    return `${d} ${tr(MONTH_SHORT[m - 1])}`;
   }
 
   function installmentLabel(p) {
-    return p.installmentNo && p.installmentTotal ? `Prestação ${p.installmentNo}/${p.installmentTotal}` : '';
+    return p.installmentNo && p.installmentTotal ? `${tr('Prestação')} ${p.installmentNo}/${p.installmentTotal}` : '';
   }
 
   // Plano de prestações: cada prestação é um pagamento individual (referência editável).
@@ -130,7 +133,7 @@
 
   function stepMonths(frequency, customMonths) {
     const step = frequency === 'custom' ? (customMonths || 1) : FREQUENCY_MONTHS[frequency];
-    if (!step) throw new Error('Periodicidade desconhecida: ' + frequency);
+    if (!step) throw new Error(tr('Periodicidade desconhecida:') + ' ' + frequency);
     return step;
   }
 
@@ -187,7 +190,7 @@
     const inst = installmentLabel(p);
     const hay = fold([
       p.issuer, p.description, p.category, p.notes, p.invoiceNumber, p.entity, p.reference, formatReference(p.reference),
-      inst, inst.replace('/', ' de '), formatEUR(p.amountCents), centsToInput(p.amountCents), formatDate(p.dueDate)
+      inst, inst.replace('/', ' de '), inst.replace('/', ' of '), 'Prestação ' + (p.installmentNo || ''), formatEUR(p.amountCents), centsToInput(p.amountCents), formatDate(p.dueDate)
     ].join(' | '));
     return terms.every(t => hay.includes(t));
   }
@@ -201,6 +204,59 @@
       s[effectiveStatus(p, today)] += c;
     }
     return s;
+  }
+
+  // ---------- dados do painel (dashboard) ----------
+  // Por mês de vencimento. Em atraso = por pagar com data anterior a hoje; por pagar = o resto do que não está pago.
+  function monthSummary(list, ym, today) {
+    const s = { ym, count: 0, total: 0, paid: 0, pending: 0, overdue: 0 };
+    for (const p of list) {
+      if (!p.dueDate || p.dueDate.slice(0, 7) !== ym) continue;
+      const c = p.amountCents || 0;
+      s.count++; s.total += c;
+      s[effectiveStatus(p, today)] += c;
+    }
+    return s;
+  }
+
+  // Total por pagar em cada um dos "days" dias a partir de "fromISO" (inclui em atraso só no próprio dia).
+  function dailyTotals(list, fromISO, days) {
+    const out = Array.from({ length: days }, (_, i) => ({ date: addDays(fromISO, i), cents: 0, count: 0 }));
+    const idx = {};
+    out.forEach((d, i) => { idx[d.date] = i; });
+    for (const p of list) {
+      if (p.status === 'paid' || !(p.dueDate in idx)) continue;
+      const d = out[idx[p.dueDate]];
+      d.cents += p.amountCents || 0; d.count++;
+    }
+    return out;
+  }
+
+  // Totais por categoria num mês (todos os estados), do maior para o menor.
+  function categoryTotals(list, ym) {
+    const m = {};
+    for (const p of list) {
+      if (!p.dueDate || p.dueDate.slice(0, 7) !== ym) continue;
+      const k = p.category || 'Outros';
+      m[k] = (m[k] || 0) + (p.amountCents || 0);
+    }
+    return Object.keys(m).map(category => ({ category, cents: m[category] })).sort((a, b) => b.cents - a.cents);
+  }
+
+  // Últimos "n" meses até "endYm" (inclusive): total e parte já paga.
+  function monthlyTotals(list, endYm, n) {
+    const out = [];
+    for (let i = n - 1; i >= 0; i--) out.push({ ym: addMonths(endYm + '-01', -i).slice(0, 7), total: 0, paid: 0 });
+    const idx = {};
+    out.forEach((m, i) => { idx[m.ym] = i; });
+    for (const p of list) {
+      const k = p.dueDate && p.dueDate.slice(0, 7);
+      if (!(k in idx)) continue;
+      const c = p.amountCents || 0;
+      out[idx[k]].total += c;
+      if (p.status === 'paid') out[idx[k]].paid += c;
+    }
+    return out;
   }
 
   // Células do calendário de um mês (AAAA-MM), a semana começa à segunda-feira.
@@ -230,12 +286,12 @@
   function googleCalendarUrl(p) {
     const ymd = iso => iso.replace(/-/g, '');
     const inst = installmentLabel(p);
-    const title = `Pagar ${p.issuer || 'pagamento'}${inst ? ' (' + inst.toLowerCase() + ')' : ''} · ${formatEUR(p.amountCents)}`;
-    const lines = [`Valor: ${formatEUR(p.amountCents)}`];
-    if (p.entity) lines.push(`Entidade: ${p.entity}`);
-    if (p.reference) lines.push(`Referência: ${formatReference(p.reference)}`);
+    const title = `${tr('Pagar')} ${p.issuer || tr('pagamento')}${inst ? ' (' + inst.toLowerCase() + ')' : ''} · ${formatEUR(p.amountCents)}`;
+    const lines = [`${tr('Valor')}: ${formatEUR(p.amountCents)}`];
+    if (p.entity) lines.push(`${tr('Entidade')}: ${p.entity}`);
+    if (p.reference) lines.push(`${tr('Referência')}: ${formatReference(p.reference)}`);
     if (p.iban) lines.push(`IBAN: ${p.iban}`);
-    if (p.invoiceNumber) lines.push(`Fatura: ${p.invoiceNumber}`);
+    if (p.invoiceNumber) lines.push(`${tr('Fatura')}: ${p.invoiceNumber}`);
     if (p.description) lines.push(p.description);
     if (p.notes) lines.push(p.notes);
     const q = new URLSearchParams({
@@ -271,6 +327,7 @@
     newId, todayISO, localDateOf, addDays, addMonths, diffDays, effectiveStatus,
     formatEUR, centsToInput, formatDate, formatDayLabel, installmentLabel,
     generateInstallments, recurringDates, generateRecurring, recurrenceTopUp, matches, summarize, calendarCells,
+    monthSummary, dailyTotals, categoryTotals, monthlyTotals,
     emptyPayment, googleCalendarUrl, activeCount, paymentTypeOf, formatReference
   };
 }));

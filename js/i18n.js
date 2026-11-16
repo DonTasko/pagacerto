@@ -17,7 +17,13 @@
     'No Multibanco: Pagamentos e outros serviços → Estado e sector público → Pagamentos ao Estado. Introduza a referência e confirme o montante.': 'At a Multibanco ATM: Payments and other services → State and public sector → Payments to the State. Enter the reference and confirm the amount.',
     'Palavra-passe incorreta. Tente outra vez:': 'Wrong password. Try again:', 'Este PDF tem palavra-passe. Introduza-a para o ler:': 'This PDF is password-protected. Enter the password to read it:',
     'A ler o PDF…': 'Reading the PDF…',
-    'Este PDF não tem texto (parece uma imagem digitalizada). Por agora escreva os dados à mão. A leitura de fotografias chega numa próxima versão.': 'This PDF has no text (it looks like a scanned image). For now, type the details by hand. Reading photos will come in a later version.',
+    'Não foi possível ler texto neste PDF (parece uma imagem digitalizada). Escreva os dados à mão.': 'Could not read any text in this PDF (it looks like a scanned image). Please type the details by hand.',
+    'A ler o PDF digitalizado…': 'Reading the scanned PDF…', 'A ler a imagem…': 'Reading the image…', 'Ler imagem ou print': 'Read image or screenshot',
+    'Colar texto ou print da fatura': 'Paste bill text or screenshot',
+    'Dados lidos de uma imagem. Confira bem cada campo: a leitura pode falhar em algum dígito.': 'Details read from an image. Check every field carefully: the reading may get a digit wrong.',
+    'Não foi possível ler texto nesta imagem. Tente um print mais nítido, ou escreva os dados à mão.': 'Could not read any text in this image. Try a sharper screenshot, or type the details by hand.',
+    'A imagem é demasiado grande (máximo 15 MB).': 'The image is too large (15 MB maximum).',
+    'Não foi possível carregar o leitor de imagens.': 'Could not load the image reader.', 'Não foi possível abrir a imagem.': 'Could not open the image.', 'Não foi possível ler a imagem.': 'Could not read the image.',
     'Não foi possível ler o PDF.': 'Could not read the PDF.', 'O PDF é demasiado grande (máximo 15 MB).': 'The PDF is too large (15 MB maximum).',
     'Importação cancelada: o PDF tem palavra-passe.': 'Import cancelled: the PDF is password-protected.', 'Este ficheiro não parece ser um PDF válido.': 'This file does not look like a valid PDF.',
     // --- navegação
@@ -43,7 +49,7 @@
     'Pendente': 'Pending', 'Pago': 'Paid',
     // --- formulário
     'Não encontrado. Preencha à mão.': 'Not found. Fill it in by hand.', 'Confirme este campo.': 'Please confirm this field.', 'Colar texto da fatura': 'Paste bill text',
-    'Cole aqui o texto do email ou da fatura. O PagaCerto tenta preencher os campos, e você confirma.': 'Paste the text of the email or bill here. PagaCerto tries to fill in the fields, and you confirm.',
+    'Cole aqui o texto do email ou da fatura, ou cole um print (Ctrl+V). O PagaCerto tenta preencher os campos, e você confirma.': 'Paste the text of the email or bill here, or paste a screenshot (Ctrl+V). PagaCerto tries to fill in the fields, and you confirm.',
     'Reconhecer dados': 'Read details', 'Importar PDF': 'Import PDF', 'PAGAMENTO ENCONTRADO': 'PAYMENT FOUND',
     'Confira cada campo antes de guardar. Os campos a laranja precisam da sua confirmação.': 'Check each field before saving. Orange fields need your confirmation.',
     'Só este pagamento': 'This payment only', 'Plano de prestações (criar todas)': 'Installment plan (create all)', 'Pagamento recorrente': 'Recurring payment', 'Número de prestações': 'Number of installments', 'Periodicidade': 'Frequency',

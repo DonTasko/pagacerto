@@ -43,7 +43,7 @@
   window.addEventListener('appinstalled', () => { deferredInstall = null; });
 
   // ---------- ponto de entrada para partilha (Android/PWA chamam isto) ----------
-  async function handleSharedText(text, subject) {
+  async function handleSharedText(text, subject, extraWarning) {
     const entities = await R.entities.map();
     const res = P.parseInvoiceText(text, { subject: subject || '', knownEntities: entities });
     const f = res.fields;
@@ -55,7 +55,7 @@
       installmentNo: f.installmentNo, installmentTotal: f.installmentTotal,
       description: f.description || subject || ''
     });
-    draft = { payment: p, confidence: res.confidence, warnings: res.warnings, fromParse: true };
+    draft = { payment: p, confidence: res.confidence, warnings: (extraWarning ? [extraWarning] : []).concat(res.warnings), fromParse: true };
     if (location.hash === '#/new') render(); else location.hash = '#/new';
   }
 
@@ -67,15 +67,55 @@
     if (status) status.textContent = t('A ler o PDF…');
     let warning = null;
     try {
-      const text = await Pdf.extractText(bytes, askPdfPassword);
-      if (text) { await handleSharedText(text, String(name || '').replace(/\.pdf$/i, '')); return; }
-      warning = t('Este PDF não tem texto (parece uma imagem digitalizada). Por agora escreva os dados à mão. A leitura de fotografias chega numa próxima versão.');
+      let scanned = false;
+      const ocr = window.PagaOcr ? canvas => { scanned = true; return ocrRead(canvas, 'A ler o PDF digitalizado…'); } : null;
+      const text = await Pdf.extractText(bytes, askPdfPassword, ocr);
+      if (text) { await handleSharedText(text, String(name || '').replace(/\.pdf$/i, ''), scanned ? t(IMG_WARNING) : null); return; }
+      warning = t('Não foi possível ler texto neste PDF (parece uma imagem digitalizada). Escreva os dados à mão.');
     } catch (e) {
       warning = e && e.message ? t(e.message) : t('Não foi possível ler o PDF.');
     }
     draft = { payment: M.emptyPayment(), confidence: {}, warnings: [warning], fromParse: false };
     if (location.hash === '#/new') render(); else location.hash = '#/new';
   }
+
+  // ---------- ler imagem / print (OCR no dispositivo) ----------
+  const IMG_WARNING = 'Dados lidos de uma imagem. Confira bem cada campo: a leitura pode falhar em algum dígito.';
+  const MAX_IMG_BYTES = 15 * 1024 * 1024;
+
+  function ocrRead(source, label) {
+    const status = document.getElementById('pdf-status');
+    const show = p => { if (status) status.textContent = t(label || 'A ler a imagem…') + (p > 0 ? ' ' + Math.round(p * 100) + '%' : ''); };
+    show(0);
+    return window.PagaOcr.recognize(source, show);
+  }
+
+  async function importImage(blob) {
+    if (blob.size > MAX_IMG_BYTES) return showFormError(t('A imagem é demasiado grande (máximo 15 MB).'));
+    let warning = null;
+    try {
+      const text = await ocrRead(blob);
+      if (text && text.replace(/\s/g, '').length >= 20) { await handleSharedText(text, '', t(IMG_WARNING)); return; }
+      warning = t('Não foi possível ler texto nesta imagem. Tente um print mais nítido, ou escreva os dados à mão.');
+    } catch (e) {
+      warning = e && e.message ? t(e.message) : t('Não foi possível ler a imagem.');
+    }
+    const status = document.getElementById('pdf-status'); if (status) status.textContent = '';
+    draft = { payment: M.emptyPayment(), confidence: {}, warnings: [warning], fromParse: false };
+    if (location.hash === '#/new') render(); else location.hash = '#/new';
+  }
+
+  // Ctrl+V (ou colar) de um print no formulário de novo pagamento.
+  document.addEventListener('paste', e => {
+    if (location.hash !== '#/new' || !window.PagaOcr) return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.kind === 'file' && /^image\//.test(it.type)) {
+        const f = it.getAsFile();
+        if (f) { e.preventDefault(); importImage(f).catch(showFatal); return; }
+      }
+    }
+  });
 
   function b64ToBytes(b64) {
     const bin = atob(b64), out = new Uint8Array(bin.length);
@@ -84,6 +124,12 @@
   }
 
   document.addEventListener('change', e => {
+    if (e.target && e.target.id === 'f-img') {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (f && window.PagaOcr) importImage(f).catch(showFatal);
+      return;
+    }
     if (!e.target || e.target.id !== 'f-pdf') return;
     const f = e.target.files && e.target.files[0];
     e.target.value = '';
@@ -371,10 +417,12 @@
 
     const paste = existingId ? '' : `
       <div class="card">
-        <label for="f-paste" style="margin-top:0">${t('Colar texto da fatura')}</label>
-        <textarea id="f-paste" placeholder="${esc(t('Cole aqui o texto do email ou da fatura. O PagaCerto tenta preencher os campos, e você confirma.'))}"></textarea>
+        <label for="f-paste" style="margin-top:0">${t('Colar texto ou print da fatura')}</label>
+        <textarea id="f-paste" placeholder="${esc(t('Cole aqui o texto do email ou da fatura, ou cole um print (Ctrl+V). O PagaCerto tenta preencher os campos, e você confirma.'))}"></textarea>
         <button class="btn secondary small" data-action="parse">${t('Reconhecer dados')}</button>
         <label class="btn secondary small" for="f-pdf" style="cursor:pointer">📄 ${t('Importar PDF')}</label>
+        <label class="btn secondary small" for="f-img" style="cursor:pointer">🖼️ ${t('Ler imagem ou print')}</label>
+        <input id="f-img" type="file" accept="image/*" style="display:none">
         <input id="f-pdf" type="file" accept="application/pdf,.pdf" style="display:none">
         <div id="pdf-status" class="hint" style="color:var(--muted)"></div>
       </div>`;

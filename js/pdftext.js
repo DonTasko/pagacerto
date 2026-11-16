@@ -1,5 +1,5 @@
 /* PagaCerto — extrair texto de um PDF, no próprio dispositivo (pdf.js da Mozilla, incluído em lib/pdfjs, sem CDN).
- * O PDF nunca sai do dispositivo. PDFs que são só imagem (digitalizados) não têm texto: pede-se foto/OCR (fase seguinte).
+ * O PDF nunca sai do dispositivo. PDFs que são só imagem (digitalizados) são lidos com o OCR (js/ocr.js), se for passado.
  */
 (function (root) {
   'use strict';
@@ -44,7 +44,7 @@
   }
 
   /** bytes: Uint8Array | ArrayBuffer. askPassword(wrong:boolean) => string | null (null = cancelar). */
-  async function extractText(bytes, askPassword) {
+  async function extractText(bytes, askPassword, ocr) {
     const lib = await load();
     const task = lib.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false, useSystemFonts: false });
     let cancelled = false;
@@ -67,8 +67,25 @@
       const content = await page.getTextContent();
       pages.push(linesOf(content.items).join('\n'));
     }
+    let text = pages.join('\n\n').trim();
+    // PDF digitalizado (só imagem): desenha as primeiras páginas e lê-as com o OCR do dispositivo.
+    if (!text && ocr) {
+      const outs = [];
+      for (let i = 1; i <= Math.min(pdf.numPages, 3); i++) {
+        const page = await pdf.getPage(i);
+        const base = page.getViewport({ scale: 1 });
+        const viewport = page.getViewport({ scale: Math.min(3, 2200 / Math.max(base.width, 1)) });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        outs.push(await ocr(canvas));
+      }
+      text = outs.join('\n\n').trim();
+    }
     try { await task.destroy(); } catch (e) { /* já libertado */ }
-    return pages.join('\n\n').trim();
+    return text;
   }
 
   root.PagaPdf = { extractText, PdfError };

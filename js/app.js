@@ -43,18 +43,20 @@
   window.addEventListener('appinstalled', () => { deferredInstall = null; });
 
   // ---------- ponto de entrada para partilha (Android/PWA chamam isto) ----------
-  async function handleSharedText(text, subject, extraWarning) {
-    const entities = await R.entities.map();
-    const res = P.parseInvoiceText(text, { subject: subject || '', knownEntities: entities });
-    const f = res.fields;
-    const p = M.emptyPayment();
-    Object.assign(p, {
+  function parsedFields(f, subject) {
+    return {
       paymentType: f.paymentType || 'mb',
       issuer: f.issuer, amountCents: f.amountCents, dueDate: f.dueDate, entity: f.entity,
       reference: f.reference, iban: f.iban, invoiceNumber: f.invoiceNumber, category: f.category,
       installmentNo: f.installmentNo, installmentTotal: f.installmentTotal,
       description: f.description || subject || ''
-    });
+    };
+  }
+  async function handleSharedText(text, subject, extraWarning) {
+    const entities = await R.entities.map();
+    const res = P.parseInvoiceText(text, { subject: subject || '', knownEntities: entities });
+    const p = M.emptyPayment();
+    Object.assign(p, parsedFields(res.fields, subject));
     draft = { payment: p, confidence: res.confidence, warnings: (extraWarning ? [extraWarning] : []).concat(res.warnings), fromParse: true };
     if (location.hash === '#/new') render(); else location.hash = '#/new';
   }
@@ -136,6 +138,244 @@
     if (!f) return;
     if (f.size > 15 * 1024 * 1024) return showFormError(t('O PDF é demasiado grande (máximo 15 MB).'));
     f.arrayBuffer().then(buf => importPdfBytes(buf, f.name)).catch(showFatal);
+  });
+
+  // ---------- importação em lote: email (.eml), ZIP, vários PDFs/imagens ----------
+  const BATCH_MAX_ITEMS = 40;
+  const BATCH_MIN_IMG = 20 * 1024; // imagens mais pequenas costumam ser logótipos/assinaturas do email
+  let batch = null; // { busy, status, rows: [], notes: [] }
+
+  const fileKind = (name, type) => {
+    if (/\.zip$/i.test(name) || /zip/.test(type || '')) return 'zip';
+    if (/\.eml$/i.test(name) || type === 'message/rfc822') return 'eml';
+    if (/\.pdf$/i.test(name) || type === 'application/pdf') return 'pdf';
+    if (/\.(png|jpe?g|webp|bmp|gif)$/i.test(name) || /^image\/(png|jpe?g|webp|bmp|gif)/.test(type || '')) return 'img';
+    return '';
+  };
+
+  async function collectItems(entries, ctx, depth) {
+    for (const e of entries) {
+      const kind = fileKind(e.name, e.type);
+      if (kind === 'zip' && depth < 2) {
+        try { await collectItems(await window.PagaMail.readZip(e.bytes), ctx, depth + 1); }
+        catch (err) { ctx.notes.push(t('Não foi possível abrir o ZIP "{n}".', { n: e.name })); }
+      } else if (kind === 'eml' && depth < 3) {
+        const m = window.PagaMail.parseEml(e.bytes);
+        if (m.text) ctx.bodies.push({ name: m.subject || e.name, text: m.text });
+        await collectItems(m.attachments, ctx, depth + 1);
+      } else if (kind === 'pdf' || kind === 'img') {
+        if (e.bytes.length > MAX_IMG_BYTES) { ctx.notes.push(t('"{n}" é demasiado grande (máximo 15 MB).', { n: e.name })); continue; }
+        if (kind === 'img' && e.bytes.length < BATCH_MIN_IMG) continue;
+        if (ctx.items.length >= BATCH_MAX_ITEMS) { ctx.over++; continue; }
+        ctx.items.push({ name: e.name, kind, bytes: e.bytes });
+      } else if (e.name && depth > 0 && !/\.(p7s|ics|vcf|txt|html?)$/i.test(e.name)) {
+        ctx.notes.push(t('Ignorado: "{n}" (só PDF, imagens, ZIP e emails).', { n: e.name }));
+      }
+    }
+  }
+
+  async function readBatchItem(item) {
+    let scanned = false;
+    if (item.kind === 'pdf') {
+      const ocr = window.PagaOcr ? c => { scanned = true; return window.PagaOcr.recognize(c, () => {}); } : null;
+      const ask = wrong => prompt(item.name + '\n' + (wrong ? t('Palavra-passe incorreta. Tente outra vez:') : t('Este PDF tem palavra-passe. Introduza-a para o ler:')));
+      return { text: await Pdf.extractText(item.bytes, ask, ocr), scanned };
+    }
+    if (!window.PagaOcr) throw new Error('Não foi possível carregar o leitor de imagens.');
+    return { text: await window.PagaOcr.recognize(new Blob([item.bytes]), () => {}), scanned: true };
+  }
+
+  // Mesmas regras do formulário. Devolve o texto do 1.º problema, ou '' se estiver pronto a registar.
+  function batchError(p) {
+    if (!p.issuer) return t('Falta o nome de quem emite.');
+    if (p.amountCents == null || p.amountCents <= 0) return t('Falta o valor.');
+    if (!p.dueDate) return t('Falta a data de vencimento.');
+    if (p.paymentType === 'mb' && p.entity && !/^\d{5}$/.test(p.entity)) return t('A entidade Multibanco tem 5 dígitos.');
+    if (p.paymentType === 'mb' && p.reference && !/^\d{9}$/.test(p.reference)) return t('A referência Multibanco tem 9 dígitos.');
+    if (p.paymentType === 'state' && !/^\d{15}$/.test(p.reference)) return t('A referência de um pagamento ao Estado tem 15 dígitos. Confira o documento.');
+    return '';
+  }
+  const dupKey = p => p.reference
+    ? ['r', p.paymentType, p.entity || '', p.reference, p.amountCents, p.dueDate].join('|')
+    : ['i', String(p.issuer || '').toLowerCase(), p.invoiceNumber || '', p.amountCents, p.dueDate].join('|');
+
+  function markDuplicates(rows, existing) {
+    const seen = new Map(existing.map(p => [dupKey(p), t('Já está registado.')]));
+    rows.forEach(r => {
+      r.err = r.readError || batchError(r.p);
+      r.dup = '';
+      if (r.err) return;
+      const k = dupKey(r.p);
+      if (seen.has(k)) r.dup = seen.get(k);
+      else seen.set(k, t('Repetido neste lote.'));
+    });
+  }
+
+  async function runBatch(files) {
+    batch = { busy: true, status: t('A preparar…'), rows: [], notes: [] };
+    if (location.hash === '#/batch') render(); else location.hash = '#/batch';
+    const setStatus = s => { batch.status = s; const el = document.getElementById('batch-status'); if (el) el.textContent = s; };
+    try {
+      const entries = [];
+      for (const f of files) entries.push({ name: f.name, type: f.type, bytes: new Uint8Array(await f.arrayBuffer()) });
+      const ctx = { items: [], bodies: [], notes: batch.notes, over: 0 };
+      await collectItems(entries, ctx, 0);
+      if (ctx.over) ctx.notes.push(t('Só foram lidos os primeiros {n} ficheiros. Importe os restantes num segundo lote.', { n: BATCH_MAX_ITEMS }));
+      const known = await R.entities.map();
+      const rows = [];
+      const addRow = (name, text, scanned, readError) => {
+        const subject = String(name || '').replace(/\.(pdf|png|jpe?g|webp|bmp|gif|eml)$/i, '');
+        const ok = text && text.replace(/\s/g, '').length >= 20;
+        const res = ok ? P.parseInvoiceText(text, { subject, knownEntities: known }) : null;
+        const p = M.emptyPayment();
+        if (res) Object.assign(p, parsedFields(res.fields, subject));
+        rows.push({
+          name, p, scanned, include: false, dup: '', err: '',
+          readError: readError || (ok ? '' : t('Não foi possível ler texto neste ficheiro.')),
+          warnings: res ? res.warnings : []
+        });
+      };
+      for (let i = 0; i < ctx.items.length; i++) {
+        const it = ctx.items[i];
+        setStatus(t('A ler {i} de {n}: {name}', { i: i + 1, n: ctx.items.length, name: it.name }));
+        try { const r = await readBatchItem(it); addRow(it.name, r.text, r.scanned, ''); }
+        catch (e) { addRow(it.name, '', false, e && e.message ? t(e.message) : t('Não foi possível ler o ficheiro.')); }
+      }
+      if (!rows.length && ctx.bodies.length) { // email sem anexos: tenta o texto do próprio email
+        ctx.bodies.forEach(b => addRow(b.name, b.text, false, ''));
+        ctx.notes.push(t('O email não tinha anexos legíveis: foi lido o texto do email.'));
+      }
+      markDuplicates(rows, await R.payments.list());
+      rows.forEach(r => { r.include = !r.err && !r.dup; });
+      batch.rows = rows;
+    } catch (e) {
+      batch.notes.push(e && e.message ? t(e.message) : t('Não foi possível ler os ficheiros.'));
+    }
+    batch.busy = false;
+    if (location.hash === '#/batch') render();
+  }
+
+  const batchTotals = () => {
+    const sel = batch.rows.filter(r => r.include && !r.err);
+    return { n: sel.length, cents: sel.reduce((s, r) => s + (r.p.amountCents || 0), 0) };
+  };
+
+  const batchMsgHtml = r => r.err ? `<span style="color:#c0392b">${esc(r.err)}</span>`
+    : r.dup ? `<span style="color:#9a5a00">${esc(r.dup)}</span>` : `<span style="color:#157a41">✓ ${t('Pronto a registar')}</span>`;
+
+  function batchRowHtml(r, i) {
+    const p = r.p;
+    if (!r.err && !r.dup && !r.open) { // linha compacta: tudo certo, só mostra o resumo
+      return `<div class="card brow" id="brow-${i}">
+        <label class="brow-head"><input type="checkbox" data-bchk="${i}" ${r.include ? 'checked' : ''}>
+          <span class="grow" style="min-width:0"><b>${esc(p.issuer)}</b> · ${M.formatEUR(p.amountCents)}<br>
+          <span class="muted" style="font-size:13px">${M.formatDate(p.dueDate)} · ${esc(r.name)}</span></span></label>
+        <a href="#/batch" class="muted" data-action="batch-edit" data-arg="${i}" style="font-size:13px">${t('Editar')}</a></div>`;
+    }
+    return `<div class="card brow" id="brow-${i}">
+      <label class="brow-head"><input type="checkbox" data-bchk="${i}" ${r.include ? 'checked' : ''} ${r.err ? 'disabled' : ''}>
+        <b>${esc(r.name)}</b></label>
+      ${r.scanned ? `<div class="hint" style="color:var(--muted)">${t(IMG_WARNING)}</div>` : ''}
+      <div class="brow-grid">
+        <div><label>${t('Nome / Emissor')}</label><input data-bf="${i}.issuer" value="${esc(p.issuer)}" autocomplete="off"></div>
+        <div><label>${t('Valor (€)')}</label><input data-bf="${i}.amount" value="${esc(M.centsToInput(p.amountCents))}" inputmode="decimal" autocomplete="off"></div>
+        <div><label>${t('Data de vencimento')}</label><input data-bf="${i}.due" type="date" value="${esc(p.dueDate)}"></div>
+        <div><label>${t('Referência')}${p.paymentType === 'mb' && p.entity ? ' · ' + t('Entidade') + ' ' + esc(p.entity) : ''}</label><input data-bf="${i}.reference" value="${esc(p.reference)}" inputmode="numeric" autocomplete="off"></div>
+      </div>
+      <div class="hint" id="bmsg-${i}">${batchMsgHtml(r)}</div>
+    </div>`;
+  }
+
+  function batchSummary() {
+    const el = document.getElementById('batch-total'); if (!el || !batch) return;
+    const tt = batchTotals();
+    el.textContent = t('Registar {n} pagamentos · {total}', { n: tt.n, total: M.formatEUR(tt.cents) });
+    const btn = document.getElementById('batch-save'); if (btn) btn.disabled = tt.n === 0;
+  }
+
+  const MULTI_INPUT = `<input id="f-multi" type="file" multiple accept="application/pdf,.pdf,image/*,.eml,message/rfc822,.zip,application/zip" style="display:none">`;
+
+  async function viewBatch() {
+    const picker = `<label class="btn" for="f-multi" style="cursor:pointer;display:block;text-align:center">📚 ${t('Escolher ficheiros')}</label>${MULTI_INPUT}`;
+    let body;
+    if (!batch) {
+      body = `<div class="card"><p style="margin-top:0">${t('Escolha de uma só vez todos os PDFs de um email, um ficheiro de email (.eml) ou um ZIP. O PagaCerto lê cada documento no seu telemóvel e mostra os pagamentos para confirmar.')}</p>
+        ${picker}
+        <div class="hint" style="color:var(--muted);margin-top:10px">${t('Dica: na aplicação de email, guarde os anexos (ou o email em .eml) e escolha-os aqui. No computador também pode arrastar os ficheiros para esta página.')}</div></div>`;
+    } else if (batch.busy) {
+      body = `<div class="card"><div id="batch-status" class="hint">${esc(batch.status)}</div></div>`;
+    } else {
+      const notes = batch.notes.length ? `<div class="alert">${batch.notes.map(esc).join('<br>')}</div>` : '';
+      if (!batch.rows.length) {
+        body = `${notes}<div class="alert red">${t('Não foram encontrados PDFs nem imagens para ler.')}</div><div class="card">${picker}</div>`;
+      } else {
+        const okN = batch.rows.filter(r => !r.err && !r.dup).length;
+        body = `${notes}<div class="alert blue">${t('Foram lidos {n} documentos, {ok} prontos. Confira os valores antes de registar.', { n: batch.rows.length, ok: okN })}</div>
+          ${batch.rows.map(batchRowHtml).join('')}
+          <button class="btn" id="batch-save" data-action="batch-save" style="margin-top:12px"><span id="batch-total"></span></button>
+          <div style="margin-top:10px"><label class="btn secondary small" for="f-multi" style="cursor:pointer">${t('Escolher outros ficheiros')}</label>${MULTI_INPUT}</div>`;
+      }
+    }
+    $app.innerHTML = layout('payments', `<a href="#/new" class="muted" data-action="batch-cancel">← ${t('Cancelar')}</a>
+      <h1 style="margin-top:8px">${t('Importar vários documentos')}</h1>${body}`, { noFab: true });
+    batchSummary();
+  }
+
+  document.addEventListener('change', e => {
+    if (e.target && e.target.id === 'f-multi') {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      if (files.length) runBatch(files).catch(showFatal);
+      return;
+    }
+    const i = e.target && e.target.dataset && e.target.dataset.bchk;
+    if (i != null && batch) { batch.rows[+i].include = e.target.checked; batchSummary(); }
+  });
+
+  document.addEventListener('input', e => {
+    const k = e.target && e.target.dataset && e.target.dataset.bf;
+    if (!k || !batch) return;
+    const [i, f] = k.split('.');
+    const r = batch.rows[+i], v = e.target.value.trim();
+    if (f === 'issuer') r.p.issuer = v;
+    else if (f === 'amount') r.p.amountCents = P.parseAmountToCents(v);
+    else if (f === 'due') r.p.dueDate = v;
+    else if (f === 'reference') r.p.reference = v.replace(/[\s.]/g, '');
+    r.readError = '';
+    R.payments.list().then(existing => {
+      markDuplicates(batch.rows, existing);
+      batch.rows.forEach((x, j) => {
+        const m = document.getElementById('bmsg-' + j); if (m) m.innerHTML = batchMsgHtml(x);
+        const c = document.querySelector(`[data-bchk="${j}"]`);
+        if (!c) return;
+        c.disabled = !!x.err;
+        if (x.err) { c.checked = false; x.include = false; }
+        else if (j === +i && !x.dup && !x.include) { c.checked = true; x.include = true; }
+      });
+      batchSummary();
+    });
+  });
+
+  async function saveBatch() {
+    const rows = batch.rows.filter(r => r.include && !r.err);
+    if (!rows.length) return;
+    const list = rows.map(r => Object.assign(r.p, { status: 'pending' }));
+    await R.payments.saveMany(list);
+    for (const p of list) if (p.entity) await R.entities.remember(p.entity, p.issuer);
+    batch = null;
+    if (window.PagaAds) window.PagaAds.onSaved().catch(() => {});
+    location.hash = '#/payments';
+  }
+
+  // Arrastar ficheiros para o ecrã (computador).
+  const dropOk = e => /^#\/(new|batch)/.test(location.hash) && e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  document.addEventListener('dragover', e => { if (dropOk(e)) e.preventDefault(); });
+  document.addEventListener('drop', e => {
+    if (!dropOk(e)) return;
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 1 && fileKind(files[0].name, files[0].type) === 'pdf') { files[0].arrayBuffer().then(buf => importPdfBytes(buf, files[0].name)).catch(showFatal); return; }
+    if (files.length) runBatch(files).catch(showFatal);
   });
 
   // Android: o texto partilhado fica guardado no código nativo até a parte web o pedir.
@@ -422,6 +662,7 @@
         <button class="btn secondary small" data-action="parse">${t('Reconhecer dados')}</button>
         <label class="btn secondary small" for="f-pdf" style="cursor:pointer">📄 ${t('Importar PDF')}</label>
         <label class="btn secondary small" for="f-img" style="cursor:pointer">🖼️ ${t('Ler imagem ou print')}</label>
+        <a class="btn secondary small" href="#/batch">📚 ${t('Vários documentos (email, ZIP)')}</a>
         <input id="f-img" type="file" accept="image/*" style="display:none">
         <input id="f-pdf" type="file" accept="application/pdf,.pdf" style="display:none">
         <div id="pdf-status" class="hint" style="color:var(--muted)"></div>
@@ -959,7 +1200,10 @@
       try { await S.deleteAccount(); accMsg = { type: 'ok', text: t('Conta apagada. Os pagamentos deste dispositivo mantêm-se.') }; } catch (e) { accFail(e); }
       render();
     },
-    cancel() { draft = null; }
+    cancel() { draft = null; },
+    'batch-cancel'() { batch = null; },
+    'batch-edit'(i) { batch.rows[+i].open = true; render(); },
+    async 'batch-save'() { await saveBatch(); }
   };
 
   document.addEventListener('click', e => {
@@ -998,11 +1242,13 @@
       if (!onboarded) return viewOnboarding();
       const [, route, arg] = (location.hash.replace(/^#/, '') || '/').split('/');
       if (route !== 'new' && route !== 'edit' && draft) draft = null;
+      if (route !== 'batch' && batch && !batch.busy) batch = null;
       switch (route) {
         case '': case undefined: return await viewHome();
         case 'payments': return await viewPayments();
         case 'p': return await viewDetail(arg);
         case 'new': return await viewForm(null);
+        case 'batch': return await viewBatch();
         case 'edit': return await viewForm(arg);
         case 'calendar': return await viewCalendar();
         case 'history': return await viewHistory();
